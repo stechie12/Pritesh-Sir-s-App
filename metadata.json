@@ -1,0 +1,6 @@
+{
+  "name": "Selina Fluent Math Academy — ICSE & CBSE AI Tutor",
+  "description": "Windows 11 Fluent UI digital mathematics tutor and adaptive learning studio for Standards 8 to 12 (ICSE Selina Concise Mathematics & CBSE), featuring voice tutoring, adaptive sums, interactive visualizers, and cloud-synced parent & teacher dashboards.",
+  "requestFramePermissions": ["microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

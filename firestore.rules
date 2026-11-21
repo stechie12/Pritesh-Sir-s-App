@@ -1,0 +1,238 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // 1. Global Safety Net: Default-deny catch-all
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Hardened Global Helpers
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerifiedUser() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    // Master Gate Helper: Verifies parent student document exists and is owned by caller
+    function hasValidParentStudent(studentId) {
+      return exists(/databases/$(database)/documents/students/$(studentId)) &&
+        get(/databases/$(database)/documents/students/$(studentId)).data.uid == request.auth.uid;
+    }
+
+    // Validation Blueprint: StudentProfile
+    function isValidStudentProfile(data) {
+      return data.keys().hasAll([
+          'uid',
+          'displayName',
+          'grade',
+          'board',
+          'adaptiveRating',
+          'solvedCount',
+          'accuracyPercent',
+          'streakDays',
+          'weakTopics',
+          'createdAt',
+          'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'uid',
+          'displayName',
+          'grade',
+          'board',
+          'adaptiveRating',
+          'solvedCount',
+          'accuracyPercent',
+          'streakDays',
+          'weakTopics',
+          'createdAt',
+          'updatedAt'
+        ]) &&
+        data.uid is string && data.uid.size() >= 1 && data.uid.size() <= 128 &&
+        data.uid.matches('^[a-zA-Z0-9_\\-]+$') &&
+        data.uid == request.auth.uid &&
+        data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 80 &&
+        data.grade is string && data.grade.size() >= 1 && data.grade.size() <= 4 &&
+        (data.grade == '8' || data.grade == '9' || data.grade == '10' || data.grade == '11' || data.grade == '12') &&
+        data.board is string && data.board.size() >= 1 && data.board.size() <= 10 &&
+        (data.board == 'ICSE' || data.board == 'CBSE') &&
+        data.adaptiveRating is number && data.adaptiveRating >= 600 && data.adaptiveRating <= 2600 &&
+        data.solvedCount is number && data.solvedCount >= 0 && data.solvedCount <= 100000 &&
+        data.accuracyPercent is number && data.accuracyPercent >= 0 && data.accuracyPercent <= 100 &&
+        data.streakDays is number && data.streakDays >= 0 && data.streakDays <= 3650 &&
+        data.weakTopics is list && data.weakTopics.size() <= 10 &&
+        (data.weakTopics.size() == 0 || (data.weakTopics[0] is string && data.weakTopics[0].size() <= 80)) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    // Validation Blueprint: AttemptRecord
+    function isValidAttemptRecord(data) {
+      return data.keys().hasAll([
+          'uid',
+          'problemId',
+          'chapter',
+          'grade',
+          'board',
+          'difficulty',
+          'isCorrect',
+          'timeSpentSec',
+          'ratingDelta',
+          'createdAt'
+        ]) &&
+        data.keys().hasOnly([
+          'uid',
+          'problemId',
+          'chapter',
+          'grade',
+          'board',
+          'difficulty',
+          'isCorrect',
+          'timeSpentSec',
+          'ratingDelta',
+          'createdAt'
+        ]) &&
+        data.uid is string && data.uid.size() >= 1 && data.uid.size() <= 128 &&
+        data.uid.matches('^[a-zA-Z0-9_\\-]+$') &&
+        data.uid == request.auth.uid &&
+        data.problemId is string && data.problemId.size() >= 1 && data.problemId.size() <= 64 &&
+        data.problemId.matches('^[a-zA-Z0-9_\\-]+$') &&
+        data.chapter is string && data.chapter.size() >= 1 && data.chapter.size() <= 100 &&
+        data.grade is string && data.grade.size() >= 1 && data.grade.size() <= 4 &&
+        (data.grade == '8' || data.grade == '9' || data.grade == '10' || data.grade == '11' || data.grade == '12') &&
+        data.board is string && data.board.size() >= 1 && data.board.size() <= 10 &&
+        (data.board == 'ICSE' || data.board == 'CBSE') &&
+        data.difficulty is string && data.difficulty.size() >= 1 && data.difficulty.size() <= 20 &&
+        (data.difficulty == 'Foundation' || data.difficulty == 'Standard' || data.difficulty == 'Challenging') &&
+        data.isCorrect is bool &&
+        data.timeSpentSec is number && data.timeSpentSec >= 0 && data.timeSpentSec <= 7200 &&
+        data.ratingDelta is number && data.ratingDelta >= -200 && data.ratingDelta <= 200 &&
+        data.createdAt is timestamp;
+    }
+
+    // Validation Blueprint: DoubtSession
+    function isValidDoubtSession(data) {
+      return data.keys().hasAll([
+          'uid',
+          'grade',
+          'board',
+          'topic',
+          'question',
+          'answer',
+          'createdAt'
+        ]) &&
+        data.keys().hasOnly([
+          'uid',
+          'grade',
+          'board',
+          'topic',
+          'question',
+          'answer',
+          'createdAt'
+        ]) &&
+        data.uid is string && data.uid.size() >= 1 && data.uid.size() <= 128 &&
+        data.uid.matches('^[a-zA-Z0-9_\\-]+$') &&
+        data.uid == request.auth.uid &&
+        data.grade is string && data.grade.size() >= 1 && data.grade.size() <= 4 &&
+        (data.grade == '8' || data.grade == '9' || data.grade == '10' || data.grade == '11' || data.grade == '12') &&
+        data.board is string && data.board.size() >= 1 && data.board.size() <= 10 &&
+        (data.board == 'ICSE' || data.board == 'CBSE') &&
+        data.topic is string && data.topic.size() >= 1 && data.topic.size() <= 100 &&
+        data.question is string && data.question.size() >= 1 && data.question.size() <= 1000 &&
+        data.answer is string && data.answer.size() >= 1 && data.answer.size() <= 4000 &&
+        data.createdAt is timestamp;
+    }
+
+    // Collection: /students/{studentId}
+    match /students/{studentId} {
+      allow get: if isOwner(studentId) && isValidId(studentId);
+      allow list: if isSignedIn() && resource.data.uid == request.auth.uid;
+
+      allow create: if isVerifiedUser() &&
+        isOwner(studentId) &&
+        isValidId(studentId) &&
+        isValidStudentProfile(incoming()) &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+
+      allow update: if isVerifiedUser() &&
+        isOwner(studentId) &&
+        isValidId(studentId) &&
+        isValidStudentProfile(incoming()) &&
+        incoming().uid == existing().uid &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time && (
+          // Action 1: Update curriculum or profile preferences
+          incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'grade', 'board', 'updatedAt']) ||
+          // Action 2: Sync adaptive practice progress & mastery stats
+          incoming().diff(existing()).affectedKeys().hasOnly([
+            'grade',
+            'board',
+            'adaptiveRating',
+            'solvedCount',
+            'accuracyPercent',
+            'streakDays',
+            'weakTopics',
+            'updatedAt'
+          ])
+        );
+
+      allow delete: if false;
+
+      // Subcollection: /students/{studentId}/attempts/{attemptId}
+      match /attempts/{attemptId} {
+        allow get: if isOwner(studentId) && isValidId(studentId) && isValidId(attemptId) && hasValidParentStudent(studentId);
+        allow list: if isOwner(studentId) && resource.data.uid == request.auth.uid;
+
+        allow create: if isVerifiedUser() &&
+          isOwner(studentId) &&
+          isValidId(studentId) &&
+          isValidId(attemptId) &&
+          isValidAttemptRecord(incoming()) &&
+          incoming().createdAt == request.time &&
+          hasValidParentStudent(studentId);
+
+        allow update: if false;
+        allow delete: if false;
+      }
+
+      // Subcollection: /students/{studentId}/doubts/{doubtId}
+      match /doubts/{doubtId} {
+        allow get: if isOwner(studentId) && isValidId(studentId) && isValidId(doubtId) && hasValidParentStudent(studentId);
+        allow list: if isOwner(studentId) && resource.data.uid == request.auth.uid;
+
+        allow create: if isVerifiedUser() &&
+          isOwner(studentId) &&
+          isValidId(studentId) &&
+          isValidId(doubtId) &&
+          isValidDoubtSession(incoming()) &&
+          incoming().createdAt == request.time &&
+          hasValidParentStudent(studentId);
+
+        allow update: if false;
+        allow delete: if isVerifiedUser() &&
+          isOwner(studentId) &&
+          isValidId(studentId) &&
+          isValidId(doubtId) &&
+          hasValidParentStudent(studentId);
+      }
+    }
+  }
+}

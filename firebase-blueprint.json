@@ -1,0 +1,214 @@
+{
+  "entities": {
+    "StudentProfile": {
+      "title": "StudentProfile",
+      "description": "Stores a student's curriculum settings, adaptive rating, mastery stats, and daily streak.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "description": "Firebase Auth UID of the student owner.",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "displayName": {
+          "type": "string",
+          "description": "Student display name.",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "grade": {
+          "type": "string",
+          "description": "Current standard (8, 9, 10, 11, or 12).",
+          "enum": ["8", "9", "10", "11", "12"],
+          "maxLength": 4
+        },
+        "board": {
+          "type": "string",
+          "description": "Curriculum board (ICSE or CBSE).",
+          "enum": ["ICSE", "CBSE"],
+          "maxLength": 10
+        },
+        "adaptiveRating": {
+          "type": "number",
+          "description": "Real-time adaptive ELO difficulty rating (800 to 2400)."
+        },
+        "solvedCount": {
+          "type": "number",
+          "description": "Total number of sums solved."
+        },
+        "accuracyPercent": {
+          "type": "number",
+          "description": "Overall accuracy percentage (0 to 100)."
+        },
+        "streakDays": {
+          "type": "number",
+          "description": "Current consecutive daily study streak."
+        },
+        "weakTopics": {
+          "type": "array",
+          "description": "Bounded list of up to 10 topic names requiring review.",
+          "maxLength": 10
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Creation server timestamp."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Last update server timestamp."
+        }
+      },
+      "required": [
+        "uid",
+        "displayName",
+        "grade",
+        "board",
+        "adaptiveRating",
+        "solvedCount",
+        "accuracyPercent",
+        "streakDays",
+        "weakTopics",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "AttemptRecord": {
+      "title": "AttemptRecord",
+      "description": "Records an individual problem attempt or mock test question result.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "description": "Owner student UID.",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "problemId": {
+          "type": "string",
+          "description": "Identifier of the Selina / NCERT sum.",
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "chapter": {
+          "type": "string",
+          "description": "Chapter title.",
+          "minLength": 1,
+          "maxLength": 100
+        },
+        "grade": {
+          "type": "string",
+          "enum": ["8", "9", "10", "11", "12"],
+          "maxLength": 4
+        },
+        "board": {
+          "type": "string",
+          "enum": ["ICSE", "CBSE"],
+          "maxLength": 10
+        },
+        "difficulty": {
+          "type": "string",
+          "enum": ["Foundation", "Standard", "Challenging"],
+          "maxLength": 20
+        },
+        "isCorrect": {
+          "type": "boolean",
+          "description": "Whether the student solved the sum accurately."
+        },
+        "timeSpentSec": {
+          "type": "number",
+          "description": "Time spent in seconds."
+        },
+        "ratingDelta": {
+          "type": "number",
+          "description": "Change in adaptive difficulty rating."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Attempt server timestamp."
+        }
+      },
+      "required": [
+        "uid",
+        "problemId",
+        "chapter",
+        "grade",
+        "board",
+        "difficulty",
+        "isCorrect",
+        "timeSpentSec",
+        "ratingDelta",
+        "createdAt"
+      ]
+    },
+    "DoubtSession": {
+      "title": "DoubtSession",
+      "description": "Stores a saved doubt-solving Q&A exchange with the AI Maths Tutor.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "description": "Owner student UID.",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "grade": {
+          "type": "string",
+          "enum": ["8", "9", "10", "11", "12"],
+          "maxLength": 4
+        },
+        "board": {
+          "type": "string",
+          "enum": ["ICSE", "CBSE"],
+          "maxLength": 10
+        },
+        "topic": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100
+        },
+        "question": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1000
+        },
+        "answer": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4000
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Creation server timestamp."
+        }
+      },
+      "required": [
+        "uid",
+        "grade",
+        "board",
+        "topic",
+        "question",
+        "answer",
+        "createdAt"
+      ]
+    }
+  },
+  "firestore": {
+    "/students/{studentId}": {
+      "schema": { "$ref": "#/entities/StudentProfile" },
+      "description": "Student profile and real-time adaptive mastery document, keyed by auth UID."
+    },
+    "/students/{studentId}/attempts/{attemptId}": {
+      "schema": { "$ref": "#/entities/AttemptRecord" },
+      "description": "Subcollection of individual sum and mock test attempts for a student."
+    },
+    "/students/{studentId}/doubts/{doubtId}": {
+      "schema": { "$ref": "#/entities/DoubtSession" },
+      "description": "Subcollection of AI tutor doubt-solving exchanges saved by the student."
+    }
+  }
+}
