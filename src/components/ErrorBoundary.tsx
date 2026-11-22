@@ -1,6 +1,11 @@
 import React from 'react';
 import { AlertTriangle, RefreshCw, Trash2 } from 'lucide-react';
 import { clearAppStorageCache } from '../utils/storageSafety';
+import {
+  clearServiceWorkerAndCaches,
+  isChunkLoadError,
+  triggerChunkRecoveryReload,
+} from '../utils/chunkRecovery';
 
 interface ErrorBoundaryProps {
   children: React.ReactNode;
@@ -9,32 +14,41 @@ interface ErrorBoundaryProps {
 interface ErrorBoundaryState {
   hasError: boolean;
   errorMessage: string;
+  isChunkError: boolean;
 }
 
 export class ErrorBoundary extends React.Component<ErrorBoundaryProps, ErrorBoundaryState> {
   constructor(props: ErrorBoundaryProps) {
     super(props);
-    this.state = { hasError: false, errorMessage: '' };
+    this.state = { hasError: false, errorMessage: '', isChunkError: false };
   }
 
   static getDerivedStateFromError(error: Error): ErrorBoundaryState {
     return {
       hasError: true,
       errorMessage: error?.message || 'An unexpected interface error occurred.',
+      isChunkError: isChunkLoadError(error),
     };
   }
 
   componentDidCatch(error: Error) {
     console.error('App ErrorBoundary caught error:', error?.message || error);
+    if (isChunkLoadError(error)) {
+      triggerChunkRecoveryReload();
+    }
   }
 
   handleReload = () => {
-    window.location.reload();
+    void clearServiceWorkerAndCaches().finally(() => {
+      window.location.reload();
+    });
   };
 
   handleClearAndReload = () => {
     clearAppStorageCache();
-    window.location.reload();
+    void clearServiceWorkerAndCaches().finally(() => {
+      window.location.reload();
+    });
   };
 
   render() {
@@ -51,13 +65,16 @@ export class ErrorBoundary extends React.Component<ErrorBoundaryProps, ErrorBoun
           <div className="flex items-center gap-2.5 text-amber-400">
             <AlertTriangle className="w-5 h-5 shrink-0" />
             <h1 className="text-base font-semibold text-white">
-              Something went wrong in the workspace
+              {this.state.isChunkError
+                ? 'A newer version of the workspace is ready'
+                : 'Something went wrong in the workspace'}
             </h1>
           </div>
 
           <p className="text-xs text-slate-300 leading-relaxed">
-            Your progress is preserved locally. Reload the workspace or reset cached preferences if
-            the issue persists.
+            {this.state.isChunkError
+              ? 'Your browser had a cached script from an earlier build. Reload to fetch the latest version — your chat history and progress are preserved.'
+              : 'Your progress is preserved locally. Reload the workspace or reset cached preferences if the issue persists.'}
           </p>
 
           {this.state.errorMessage && (

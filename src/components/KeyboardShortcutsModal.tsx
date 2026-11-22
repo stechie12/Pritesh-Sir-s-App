@@ -11,6 +11,7 @@ const SHORTCUT_GROUPS = [
     title: 'Global Navigation',
     items: [
       { keys: 'Ctrl / ⌘ + K', description: 'Open Command Palette' },
+      { keys: 'S', description: 'Toggle Interactive Simulations Library' },
       { keys: 'F', description: 'Toggle Interactive Formula Reference' },
       { keys: '?', description: 'Show or hide Keyboard Shortcuts' },
       { keys: 'Esc', description: 'Close active drawer or modal' },
@@ -43,7 +44,7 @@ export const KeyboardShortcutsModal: React.FC<KeyboardShortcutsModalProps> = ({
 
   return (
     <div
-      className="fixed inset-0 z-50 bg-slate-950/60 backdrop-blur-[2px] flex items-center justify-center p-4"
+      className="fixed inset-0 z-50 bg-slate-950/45 dark:bg-slate-950/65 backdrop-blur-md flex items-center justify-center p-4"
       onClick={onClose}
     >
       <div
@@ -52,9 +53,9 @@ export const KeyboardShortcutsModal: React.FC<KeyboardShortcutsModalProps> = ({
         aria-label="Keyboard Shortcuts"
         data-testid="keyboard-shortcuts-modal"
         onClick={(e) => e.stopPropagation()}
-        className="w-full max-w-lg rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 shadow-2xl overflow-hidden"
+        className="w-full max-w-lg rounded-2xl border fluent-glass-panel overflow-hidden"
       >
-        <div className="flex items-center justify-between px-4 py-3 border-b border-slate-200 dark:border-slate-800">
+        <div className="flex items-center justify-between px-4 py-3 border-b border-slate-200/70 dark:border-white/10">
           <div className="flex items-center gap-2">
             <Keyboard className="w-4 h-4 text-sky-600 dark:text-sky-400" />
             <h2 className="text-sm font-semibold text-slate-900 dark:text-white font-display">

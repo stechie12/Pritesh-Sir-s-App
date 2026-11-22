@@ -168,7 +168,7 @@ export function analyzeStudentIntent(
   let labMode: StudentIntent['labMode'];
 
   if (
-    /\b(?:3d|visualize|visualise|graph|plot|simulation|cone|sphere|cylinder|mensuration|parabola|surface|sightline|lighthouse)\b/i.test(
+    /\b(?:3d|spatial\s+lab|3d\s+lab|3d\s+model|3d\s+view|3d\s+cone|3d\s+cylinder|3d\s+sphere|sightline\s+3d)\b/i.test(
       q
     )
   ) {

@@ -158,21 +158,21 @@ export const InteractiveFormulaReference: React.FC<InteractiveFormulaReferencePr
       {/* Backdrop scrim */}
       <div
         onClick={onClose}
-        className="absolute inset-0 bg-slate-950/55"
+        className="absolute inset-0 bg-slate-950/45 dark:bg-slate-950/65 backdrop-blur-md"
       />
 
-      {/* Right Slide-in Panel */}
+      {/* Right Slide-in Acrylic Panel */}
       <aside
         role="dialog"
         aria-modal="true"
         aria-label="Interactive Formula Reference"
         data-testid="interactive-formula-reference"
-        className={`fixed inset-y-0 right-0 w-full sm:max-w-xl md:max-w-2xl lg:max-w-3xl bg-white dark:bg-slate-950 border-l border-slate-200 dark:border-slate-800 shadow-2xl flex flex-col transform transition-transform duration-200 ease-[cubic-bezier(0.16,1,0.3,1)] ${
+        className={`fixed inset-y-0 right-0 w-full sm:max-w-xl md:max-w-2xl lg:max-w-3xl fluent-glass-panel border-l flex flex-col transform transition-transform duration-200 ease-[cubic-bezier(0.16,1,0.3,1)] ${
           isOpen ? 'translate-x-0' : 'translate-x-full'
         }`}
       >
         {/* Top Drawer Header */}
-        <header className="px-4 py-3 sm:px-5 sm:py-4 border-b border-slate-200 dark:border-slate-800 space-y-2.5 sm:space-y-3 shrink-0">
+        <header className="px-4 py-3 sm:px-5 sm:py-4 border-b border-slate-200/70 dark:border-white/10 space-y-2.5 sm:space-y-3 shrink-0">
           <div className="flex items-start justify-between gap-3">
             <div className="space-y-0.5 min-w-0">
               <div className="flex items-center gap-2">

@@ -233,6 +233,18 @@ export function normalizeLatexDelimiters(rawText: string): string {
     .replace(/\\\(([\s\S]*?)\\\)/g, (_m, inner: string) => `$${inner.trim()}$`);
 }
 
+/**
+ * Wraps standalone \begin{aligned|matrix|pmatrix|bmatrix|cases}...\end{...} blocks in $$...$$
+ * without using RegExp lookbehind assertions, ensuring compatibility with Safari < 16.4 and older mobile WebViews.
+ */
+export function wrapStandaloneLatexEnvironments(rawText: string): string {
+  if (!rawText) return '';
+  return rawText.replace(
+    /(^|[^$])\\begin\{(aligned|matrix|pmatrix|bmatrix|cases)\}([\s\S]*?)\\end\{\2\}(?!\$)/g,
+    (_m, prefix: string, env: string, body: string) => `${prefix}$$\\begin{${env}}${body}\\end{${env}}$$`
+  );
+}
+
 export interface ExportableTutorTurn {
   question: string;
   responseType?: 'chat' | 'math';

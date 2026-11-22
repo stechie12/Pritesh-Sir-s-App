@@ -230,22 +230,22 @@ export function validateDoubtRequest(body: unknown): ValidationResult<ValidatedD
             typeof (turn as Record<string, unknown>).text === 'string' &&
             Boolean(((turn as Record<string, unknown>).text as string).trim())
         )
-        .slice(-8)
+        .slice(-12)
         .map((turn) => ({
           role: turn.role,
-          text: turn.text.trim().slice(0, 450),
+          text: turn.text.trim().slice(0, 3500),
         }))
     : [];
 
-  // Enforce a total character budget (<= 3200 chars) across history turns for fast latency
+  // Enforce a total character budget (<= 14000 chars) across history turns so full multi-question quizzes and derivations stay intact
   const history: HistoryTurn[] = [];
-  let charBudget = 3200;
+  let charBudget = 14000;
   for (let i = rawHistory.length - 1; i >= 0; i--) {
     const turn = rawHistory[i];
     if (turn.text.length <= charBudget) {
       history.unshift(turn);
       charBudget -= turn.text.length;
-    } else if (charBudget > 60) {
+    } else if (charBudget > 120) {
       history.unshift({ role: turn.role, text: turn.text.slice(0, charBudget) });
       charBudget = 0;
       break;

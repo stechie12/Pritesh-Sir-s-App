@@ -230,7 +230,21 @@ export function classifyMessageChapter(msg: {
   conceptTitle?: string;
   chatReply?: string;
 }): 'Trigonometry' | 'Algebra' | 'Mensuration' | 'Commercial' | 'Calculus' | 'General' {
-  const combined = `${msg.question} ${msg.conceptTitle || ''} ${msg.chatReply || ''}`.toLowerCase();
+  const q = (msg.question || '').trim();
+  const qLower = q.toLowerCase();
+  if (
+    !qLower ||
+    /^(?:hi|hello|hey|hii+|yo|hola|namaste|good\s+(?:morning|afternoon|evening)|how\s+are\s+you|who\s+are\s+you|what\s+can\s+you\s+do|thanks|thank\s+you|ok|okay|bye)[!?. ]*$/i.test(
+      qLower
+    )
+  ) {
+    return 'General';
+  }
+  const title =
+    msg.conceptTitle && msg.conceptTitle !== 'AI Assistant' && !/interrupted/i.test(msg.conceptTitle)
+      ? msg.conceptTitle
+      : '';
+  const combined = `${qLower} ${title.toLowerCase()}`;
   if (/\b(sin|cos|tan|cot|sec|cosec|csc|trigonometr|angle|elevation|depression|unit circle)\b/.test(combined)) {
     return 'Trigonometry';
   }
@@ -243,7 +257,7 @@ export function classifyMessageChapter(msg: {
   if (/\b(gst|banking|recurring deposit|dividend|shares|interest|tax|maturity)\b/.test(combined)) {
     return 'Commercial';
   }
-  if (/\b(quadratic|equation|root|discriminant|matrix|matrices|ap|gp|progression|surd|factor|polynomial|solve)\b/.test(combined)) {
+  if (/\b(quadratic|parabola|vertex|equation|root|discriminant|matrix|matrices|ap|gp|progression|surd|factor|polynomial|solve|logarithm)\b|x\^2|x²/.test(combined)) {
     return 'Algebra';
   }
   return 'General';

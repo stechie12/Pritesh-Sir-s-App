@@ -10,6 +10,7 @@ import {
   formatStopwatch,
   latexToPlaintext,
   normalizeLatexDelimiters,
+  wrapStandaloneLatexEnvironments,
   pickSmartNextProblemId,
   searchPracticeProblems,
   toggleIdInList,
@@ -199,6 +200,15 @@ test('latexToPlaintext and normalizeLatexDelimiters convert mathematical notatio
 
   const norm = normalizeLatexDelimiters('Solve \\(x^2 = 9\\) and \\[a^2 + b^2 = c^2\\]');
   assert.equal(norm, 'Solve $x^2 = 9$ and $$a^2 + b^2 = c^2$$');
+
+  const wrappedStart = wrapStandaloneLatexEnvironments('\\begin{aligned}x &= 1\\end{aligned}');
+  assert.equal(wrappedStart, '$$\\begin{aligned}x &= 1\\end{aligned}$$');
+
+  const wrappedMid = wrapStandaloneLatexEnvironments('Step:\n\\begin{pmatrix}1 & 2\\end{pmatrix}');
+  assert.equal(wrappedMid, 'Step:\n$$\\begin{pmatrix}1 & 2\\end{pmatrix}$$');
+
+  const alreadyWrapped = wrapStandaloneLatexEnvironments('$$\\begin{cases}x > 0\\end{cases}$$');
+  assert.equal(alreadyWrapped, '$$\\begin{cases}x > 0\\end{cases}$$');
 });
 
 test('buildTutorMarkdownExport outputs chronological Markdown notes and formatStopwatch pads mm:ss', () => {

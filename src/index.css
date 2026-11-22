@@ -17,6 +17,8 @@
 
   html,
   body {
+    width: 100%;
+    max-width: 100%;
     overflow-x: clip;
   }
 
@@ -84,6 +86,7 @@ code {
 .katex {
   font-size: 1.05em;
   color: inherit;
+  margin: 0 0.14em;
 }
 
 .katex-display {
@@ -92,6 +95,10 @@ code {
   padding: 0.4rem 0.25rem;
   margin: 0.5rem 0;
   -webkit-overflow-scrolling: touch;
+}
+
+.katex-display .katex {
+  margin: 0;
 }
 
 html.dark .katex .mfrac .frac-line {
@@ -118,24 +125,474 @@ table thead th {
   display: none;
 }
 
-/* Windows 11 Fluent UI Mica & Acrylic surface utilities */
+/* ==========================================================================
+   Windows 11 Fluent Design System — Mica Canvas & Acrylic Glassmorphism
+   ========================================================================== */
+
 .fluent-mica-light {
-  background: radial-gradient(circle at 12% 8%, rgba(14, 165, 233, 0.06), transparent 40%),
-              radial-gradient(circle at 88% 18%, rgba(99, 102, 241, 0.05), transparent 42%),
-              #f8fafc;
+  background-color: #edf2f8;
+  background-image:
+    radial-gradient(62% 52% at 10% 6%, rgba(14, 165, 233, 0.14), transparent 62%),
+    radial-gradient(54% 48% at 90% 12%, rgba(99, 102, 241, 0.10), transparent 60%),
+    radial-gradient(52% 46% at 50% 94%, rgba(56, 189, 248, 0.08), transparent 64%);
+  background-attachment: fixed;
 }
 
 html.dark .fluent-mica-light,
 .dark .fluent-mica-dark,
 .fluent-mica-dark {
-  background: radial-gradient(circle at 15% 10%, rgba(14, 165, 233, 0.12), transparent 42%),
-              radial-gradient(circle at 85% 18%, rgba(56, 189, 248, 0.08), transparent 45%),
-              #090d16;
+  background-color: #070b14;
+  background-image:
+    radial-gradient(58% 48% at 12% 8%, rgba(14, 165, 233, 0.18), transparent 62%),
+    radial-gradient(52% 48% at 88% 14%, rgba(79, 70, 229, 0.15), transparent 60%),
+    radial-gradient(48% 44% at 52% 96%, rgba(6, 182, 212, 0.09), transparent 64%);
+  background-attachment: fixed;
 }
 
 .fluent-acrylic {
-  backdrop-filter: blur(8px);
-  -webkit-backdrop-filter: blur(8px);
+  backdrop-filter: blur(22px) saturate(180%);
+  -webkit-backdrop-filter: blur(22px) saturate(180%);
+}
+
+/* Sticky Acrylic Header & Mobile Bottom Bar */
+.fluent-acrylic-bar {
+  background: rgba(248, 251, 255, 0.74);
+  backdrop-filter: blur(24px) saturate(180%);
+  -webkit-backdrop-filter: blur(24px) saturate(180%);
+  border-color: rgba(15, 23, 42, 0.08);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.78),
+    0 10px 28px -18px rgba(15, 23, 42, 0.16);
+}
+
+html.dark .fluent-acrylic-bar {
+  background: rgba(11, 17, 30, 0.72);
+  border-color: rgba(255, 255, 255, 0.09);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.07),
+    0 12px 32px -16px rgba(2, 6, 23, 0.8);
+}
+
+/* Primary Frosted Glass Card (AI Answers, Practice Stage, Split Workspace) */
+.fluent-glass-card {
+  background: rgba(255, 255, 255, 0.76);
+  backdrop-filter: blur(20px) saturate(170%);
+  -webkit-backdrop-filter: blur(20px) saturate(170%);
+  border: 1px solid rgba(15, 23, 42, 0.09);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.88),
+    0 14px 36px -18px rgba(15, 23, 42, 0.12),
+    0 2px 8px -2px rgba(15, 23, 42, 0.04);
+}
+
+html.dark .fluent-glass-card {
+  background: rgba(15, 23, 42, 0.64);
+  border: 1px solid rgba(255, 255, 255, 0.10);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.09),
+    0 20px 44px -20px rgba(2, 6, 23, 0.84);
+}
+
+/* Dense Frosted Acrylic for Modals & Slide-in Drawers */
+.fluent-glass-panel {
+  background: rgba(248, 251, 255, 0.88);
+  backdrop-filter: blur(28px) saturate(185%);
+  -webkit-backdrop-filter: blur(28px) saturate(185%);
+  border-color: rgba(15, 23, 42, 0.11);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.92),
+    0 28px 64px -18px rgba(15, 23, 42, 0.25);
+}
+
+html.dark .fluent-glass-panel {
+  background: rgba(10, 16, 29, 0.84);
+  border-color: rgba(255, 255, 255, 0.12);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.10),
+    0 30px 72px -18px rgba(2, 6, 23, 0.92);
+}
+
+/* Secondary Inset Frosted Surface (Thought Drawer, Filter Bar, Starter Prompts, Step Rows) */
+.fluent-glass-subtle {
+  background: rgba(255, 255, 255, 0.58);
+  backdrop-filter: blur(14px) saturate(155%);
+  -webkit-backdrop-filter: blur(14px) saturate(155%);
+  border: 1px solid rgba(15, 23, 42, 0.08);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.72);
+}
+
+html.dark .fluent-glass-subtle {
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
+}
+
+/* Student Message Accent-Tinted Glass Bubble */
+.fluent-user-bubble {
+  background: linear-gradient(135deg, rgba(224, 242, 254, 0.85), rgba(238, 242, 255, 0.78));
+  backdrop-filter: blur(14px) saturate(160%);
+  -webkit-backdrop-filter: blur(14px) saturate(160%);
+  border: 1px solid rgba(14, 165, 233, 0.24);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.85),
+    0 8px 20px -12px rgba(2, 132, 199, 0.22);
+}
+
+html.dark .fluent-user-bubble {
+  background: linear-gradient(135deg, rgba(14, 165, 233, 0.20), rgba(99, 102, 241, 0.16));
+  border: 1px solid rgba(56, 189, 248, 0.28);
+  box-shadow:
+    inset 0 1px 0 rgba(186, 230, 253, 0.14),
+    0 12px 26px -14px rgba(2, 6, 23, 0.78);
+}
+
+/* Floating Acrylic Composer with Windows 11 Bottom Focus Accent Line */
+.fluent-composer-glass {
+  position: relative;
+  overflow: hidden;
+  background: rgba(255, 255, 255, 0.84);
+  backdrop-filter: blur(24px) saturate(185%);
+  -webkit-backdrop-filter: blur(24px) saturate(185%);
+  border: 1px solid rgba(15, 23, 42, 0.11);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.95),
+    0 18px 44px -18px rgba(15, 23, 42, 0.16),
+    0 2px 8px -2px rgba(15, 23, 42, 0.05);
+  transition: border-color 180ms ease, box-shadow 180ms ease;
+}
+
+.fluent-composer-glass::after {
+  content: '';
+  position: absolute;
+  left: 18px;
+  right: 18px;
+  bottom: 0;
+  height: 2px;
+  border-radius: 9999px;
+  background: linear-gradient(90deg, #0284c7, #38bdf8, #6366f1);
+  opacity: 0;
+  transform: scaleX(0.25);
+  transition: transform 220ms cubic-bezier(0.16, 1, 0.3, 1), opacity 180ms ease;
+  pointer-events: none;
+}
+
+.fluent-composer-glass:focus-within {
+  border-color: rgba(14, 165, 233, 0.42);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.95),
+    0 20px 48px -18px rgba(2, 132, 199, 0.22),
+    0 0 0 1px rgba(14, 165, 233, 0.14);
+}
+
+.fluent-composer-glass:focus-within::after {
+  opacity: 1;
+  transform: scaleX(1);
+}
+
+html.dark .fluent-composer-glass {
+  background: rgba(15, 23, 42, 0.74);
+  border: 1px solid rgba(255, 255, 255, 0.13);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.10),
+    0 24px 52px -18px rgba(2, 6, 23, 0.88);
+}
+
+html.dark .fluent-composer-glass:focus-within {
+  border-color: rgba(56, 189, 248, 0.48);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.13),
+    0 24px 54px -18px rgba(14, 165, 233, 0.24),
+    0 0 0 1px rgba(56, 189, 248, 0.18);
+}
+
+/* Fluent Secondary Control Button */
+.fluent-control {
+  background: rgba(255, 255, 255, 0.68);
+  border: 1px solid rgba(15, 23, 42, 0.09);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.85);
+  transition: background-color 150ms ease, border-color 150ms ease, color 150ms ease, transform 150ms ease;
+}
+
+.fluent-control:hover {
+  background: rgba(255, 255, 255, 0.92);
+  border-color: rgba(14, 165, 233, 0.34);
+}
+
+html.dark .fluent-control {
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.10);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.07);
+}
+
+html.dark .fluent-control:hover {
+  background: rgba(255, 255, 255, 0.10);
+  border-color: rgba(56, 189, 248, 0.38);
+}
+
+/* Fluent Primary Accent Button */
+.fluent-primary-btn {
+  background: linear-gradient(180deg, #0ea5e9 0%, #0284c7 100%);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.28),
+    0 8px 20px -8px rgba(2, 132, 199, 0.58);
+  transition: filter 150ms ease, transform 150ms ease, box-shadow 150ms ease;
+}
+
+.fluent-primary-btn:hover:not(:disabled) {
+  filter: brightness(1.06);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.35),
+    0 10px 24px -8px rgba(14, 165, 233, 0.68);
+}
+
+.fluent-primary-btn:active:not(:disabled) {
+  transform: scale(0.98);
+}
+
+/* ==========================================================================
+   Live AI Thinking Animations & Dynamic Typewriter Caret
+   ========================================================================== */
+
+@keyframes ai-shimmer-sweep {
+  0% {
+    background-position: 200% 0;
+  }
+  100% {
+    background-position: -200% 0;
+  }
+}
+
+@keyframes ai-orb-breathe {
+  0%, 100% {
+    transform: scale(0.88);
+    opacity: 0.82;
+  }
+  50% {
+    transform: scale(1.1);
+    opacity: 1;
+  }
+}
+
+@keyframes fluent-ring-spin {
+  0% {
+    transform: rotate(0deg);
+  }
+  100% {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes fluent-wave-bar {
+  0%, 100% {
+    transform: scaleY(0.32);
+    opacity: 0.45;
+  }
+  50% {
+    transform: scaleY(1);
+    opacity: 1;
+  }
+}
+
+@keyframes fluent-caret-blink {
+  0%, 100% {
+    opacity: 1;
+    transform: scaleY(1);
+  }
+  50% {
+    opacity: 0.22;
+    transform: scaleY(0.86);
+  }
+}
+
+@keyframes ai-msg-rise {
+  0% {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* Active Thinking Glass Card Top Specular Accent */
+.fluent-thinking-card {
+  position: relative;
+  overflow: hidden;
+}
+
+.fluent-thinking-card::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    rgba(14, 165, 233, 0.65) 35%,
+    rgba(99, 102, 241, 0.7) 55%,
+    transparent 100%
+  );
+  background-size: 220% 100%;
+  animation: ai-shimmer-sweep 2.4s linear infinite;
+  pointer-events: none;
+}
+
+/* Layered Copilot / Windows 11 Multi-Ring Thinking Orb */
+.fluent-thinking-orb {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.35rem;
+  height: 1.35rem;
+  border-radius: 9999px;
+  background: rgba(14, 165, 233, 0.12);
+  border: 1px solid rgba(56, 189, 248, 0.30);
+}
+
+.fluent-thinking-orb::before {
+  content: '';
+  position: absolute;
+  inset: -2px;
+  border-radius: 9999px;
+  padding: 1.5px;
+  background: conic-gradient(from 0deg, transparent 10%, #38bdf8 48%, #818cf8 76%, transparent 95%);
+  -webkit-mask:
+    linear-gradient(#fff 0 0) content-box,
+    linear-gradient(#fff 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+  animation: fluent-ring-spin 1.8s linear infinite;
+}
+
+.fluent-thinking-orb-core {
+  display: block;
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 9999px;
+  background: radial-gradient(circle at 35% 35%, #bae6fd, #0ea5e9 60%, #6366f1);
+  animation: ai-orb-breathe 1.6s ease-in-out infinite;
+}
+
+/* 4-Bar Kinetic Thinking Neural Wave */
+.fluent-thinking-wave {
+  display: inline-flex;
+  align-items: center;
+  gap: 2.5px;
+  height: 0.85rem;
+}
+
+.fluent-thinking-wave > span {
+  display: block;
+  width: 2.5px;
+  height: 100%;
+  border-radius: 9999px;
+  background: linear-gradient(180deg, #38bdf8, #6366f1);
+  transform-origin: center;
+  animation: fluent-wave-bar 1.05s ease-in-out infinite;
+}
+
+.fluent-thinking-wave > span:nth-child(2) {
+  animation-delay: 0.16s;
+}
+
+.fluent-thinking-wave > span:nth-child(3) {
+  animation-delay: 0.32s;
+}
+
+.fluent-thinking-wave > span:nth-child(4) {
+  animation-delay: 0.48s;
+}
+
+.ai-shimmer-text {
+  background: linear-gradient(
+    90deg,
+    #334155 0%,
+    #334155 30%,
+    #0284c7 50%,
+    #334155 70%,
+    #334155 100%
+  );
+  background-size: 240% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation: ai-shimmer-sweep 2s linear infinite;
+}
+
+html.dark .ai-shimmer-text {
+  background: linear-gradient(
+    90deg,
+    #94a3b8 0%,
+    #94a3b8 30%,
+    #f8fafc 50%,
+    #94a3b8 70%,
+    #94a3b8 100%
+  );
+  background-size: 240% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+.ai-breathing-orb {
+  display: inline-block;
+  width: 0.55rem;
+  height: 0.55rem;
+  border-radius: 9999px;
+  background: radial-gradient(circle at 35% 35%, #bae6fd, #0ea5e9 60%, #6366f1);
+  animation: ai-orb-breathe 1.6s ease-in-out infinite;
+}
+
+.ai-thought-shimmer-line {
+  height: 0.45rem;
+  border-radius: 9999px;
+  background: linear-gradient(
+    90deg,
+    rgba(148, 163, 184, 0.16) 0%,
+    rgba(14, 165, 233, 0.34) 50%,
+    rgba(148, 163, 184, 0.16) 100%
+  );
+  background-size: 220% 100%;
+  animation: ai-shimmer-sweep 1.75s linear infinite;
+}
+
+/* Sleek Glowing Dynamic Typing Caret (inline at exact last typed character) */
+.fluent-typing-caret {
+  display: inline-block;
+  width: 2.5px;
+  height: 1.05em;
+  border-radius: 9999px;
+  vertical-align: -0.15em;
+  margin-left: 3px;
+  background: linear-gradient(180deg, #38bdf8, #0284c7);
+  box-shadow: 0 0 8px rgba(56, 189, 248, 0.65);
+  animation: fluent-caret-blink 0.9s ease-in-out infinite;
+}
+
+.fluent-typing-active > div > p:last-child::after,
+.fluent-typing-active > div > h3:last-child::after,
+.fluent-typing-active > div > h4:last-child::after,
+.fluent-typing-active > div > ul:last-child > li:last-child::after,
+.fluent-typing-active > div > ol:last-child > li:last-child::after {
+  content: '';
+  display: inline-block;
+  width: 2.5px;
+  height: 1.05em;
+  border-radius: 9999px;
+  vertical-align: -0.15em;
+  margin-left: 4px;
+  background: linear-gradient(180deg, #38bdf8, #0284c7);
+  box-shadow: 0 0 8px rgba(56, 189, 248, 0.65);
+  animation: fluent-caret-blink 0.9s ease-in-out infinite;
+}
+
+.ai-msg-enter {
+  animation: ai-msg-rise 240ms cubic-bezier(0.16, 1, 0.3, 1) both;
 }
 
 /* #86: Respect prefers-reduced-motion for accessibility */
@@ -220,4 +677,173 @@ html.dark.high-contrast .border-slate-800\/70 {
     box-shadow: none !important;
   }
 }
+
+/* =====================================================================
+   #76 Fluent Accent Palettes, #77 Mica Backdrops, #79 Reading Density,
+   #80 Dyslexia Mode, #81 Click-to-Zoom KaTeX, #85 Low-GPU, #94 Classroom
+   ===================================================================== */
+:root {
+  --accent-primary: #0ea5e9;
+  --accent-primary-dark: #0284c7;
+  --accent-glow: rgba(14, 165, 233, 0.24);
+}
+
+html[data-accent='emerald'] {
+  --accent-primary: #10b981;
+  --accent-primary-dark: #059669;
+  --accent-glow: rgba(16, 185, 129, 0.26);
+}
+html[data-accent='amethyst'] {
+  --accent-primary: #8b5cf6;
+  --accent-primary-dark: #7c3aed;
+  --accent-glow: rgba(139, 92, 246, 0.26);
+}
+html[data-accent='amber'] {
+  --accent-primary: #f59e0b;
+  --accent-primary-dark: #d97706;
+  --accent-glow: rgba(245, 158, 11, 0.26);
+}
+html[data-accent='rose'] {
+  --accent-primary: #f43f5e;
+  --accent-primary-dark: #e11d48;
+  --accent-glow: rgba(244, 63, 94, 0.26);
+}
+
+html[data-accent] .fluent-primary-btn {
+  background: linear-gradient(180deg, var(--accent-primary) 0%, var(--accent-primary-dark) 100%);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.28),
+    0 8px 20px -8px var(--accent-glow);
+}
+
+html[data-accent] .fluent-composer-glass::after {
+  background: linear-gradient(90deg, var(--accent-primary-dark), var(--accent-primary));
+}
+
+/* #77 Dynamic Mica Backdrops */
+html[data-backdrop='aurora'] .fluent-mica-light {
+  background-color: #eef5ff;
+  background-image:
+    radial-gradient(56% 48% at 10% 10%, rgba(16, 185, 129, 0.16), transparent 60%),
+    radial-gradient(54% 48% at 90% 14%, rgba(139, 92, 246, 0.16), transparent 62%),
+    radial-gradient(46% 44% at 48% 92%, rgba(14, 165, 233, 0.14), transparent 64%);
+}
+html.dark[data-backdrop='aurora'] .fluent-mica-light,
+html.dark[data-backdrop='aurora'] .fluent-mica-dark {
+  background-color: #060b16;
+  background-image:
+    radial-gradient(56% 48% at 12% 10%, rgba(16, 185, 129, 0.19), transparent 60%),
+    radial-gradient(54% 48% at 88% 12%, rgba(139, 92, 246, 0.20), transparent 60%),
+    radial-gradient(48% 44% at 50% 94%, rgba(14, 165, 233, 0.14), transparent 64%);
+}
+
+html[data-backdrop='warm-paper'] .fluent-mica-light {
+  background-color: #faf6ee;
+  background-image:
+    radial-gradient(56% 48% at 14% 12%, rgba(245, 158, 11, 0.12), transparent 60%),
+    radial-gradient(52% 48% at 88% 16%, rgba(217, 119, 6, 0.08), transparent 62%);
+}
+html.dark[data-backdrop='warm-paper'] .fluent-mica-light,
+html.dark[data-backdrop='warm-paper'] .fluent-mica-dark {
+  background-color: #110f0c;
+  background-image:
+    radial-gradient(56% 48% at 14% 12%, rgba(245, 158, 11, 0.12), transparent 60%),
+    radial-gradient(52% 48% at 88% 16%, rgba(180, 83, 9, 0.10), transparent 62%);
+}
+
+html[data-backdrop='minimal'] .fluent-mica-light {
+  background-color: #f8fafc;
+  background-image: none;
+}
+html.dark[data-backdrop='minimal'] .fluent-mica-light,
+html.dark[data-backdrop='minimal'] .fluent-mica-dark {
+  background-color: #090d16;
+  background-image: none;
+}
+
+/* #79 Reading Density */
+html[data-density='compact'] .prose,
+html[data-density='compact'] main {
+  font-size: 0.94rem;
+  line-height: 1.48;
+}
+html[data-density='spacious'] .prose,
+html[data-density='spacious'] main {
+  font-size: 1.04rem;
+  line-height: 1.78;
+}
+
+/* #80 Dyslexia-Friendly Typography */
+html.dyslexia-mode body {
+  font-family: 'Atkinson Hyperlegible', 'Verdana', 'Segoe UI', system-ui, sans-serif;
+  letter-spacing: 0.032em;
+  word-spacing: 0.14em;
+  line-height: 1.82;
+}
+
+/* #85 Low-GPU / Reduced-Motion Battery Saver */
+html.low-gpu-mode .fluent-acrylic,
+html.low-gpu-mode .fluent-acrylic-bar,
+html.low-gpu-mode .fluent-glass-card,
+html.low-gpu-mode .fluent-glass-panel,
+html.low-gpu-mode .fluent-glass-subtle,
+html.low-gpu-mode .fluent-user-bubble,
+html.low-gpu-mode .fluent-composer-glass {
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+}
+html.low-gpu-mode *,
+html.low-gpu-mode *::before,
+html.low-gpu-mode *::after {
+  animation-duration: 0.01ms !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: 0.01ms !important;
+}
+
+/* Adaptive Performance Mode (Low Battery / Low Power / Manual Power Saver)
+   Throttles AI thinking animations and reduces expensive backdrop-filter blur radii */
+html.performance-mode .fluent-acrylic,
+html.performance-mode .fluent-acrylic-bar,
+html.performance-mode .fluent-glass-card,
+html.performance-mode .fluent-glass-panel,
+html.performance-mode .fluent-glass-subtle,
+html.performance-mode .fluent-user-bubble,
+html.performance-mode .fluent-composer-glass {
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+}
+html.performance-mode .fluent-thinking-card::before,
+html.performance-mode .fluent-thinking-orb::before,
+html.performance-mode .fluent-thinking-orb-core,
+html.performance-mode .fluent-thinking-wave > span,
+html.performance-mode .ai-shimmer-text,
+html.performance-mode .ai-thought-shimmer-line {
+  animation-duration: 4.5s !important;
+  animation-timing-function: steps(4, end) !important;
+}
+html.performance-mode .ai-shimmer-text {
+  background: none !important;
+  -webkit-background-clip: border-box !important;
+  background-clip: border-box !important;
+  color: #0284c7 !important;
+}
+html.dark.performance-mode .ai-shimmer-text {
+  color: #38bdf8 !important;
+}
+
+/* #94 Live Classroom Presentation Mode */
+html.presentation-mode {
+  font-size: 120%;
+}
+
+/* #81 Click-to-Zoom Equation affordance */
+.tutor-math-markdown .katex {
+  cursor: zoom-in;
+  border-radius: 0.35rem;
+  transition: background-color 140ms ease;
+}
+.tutor-math-markdown .katex:hover {
+  background-color: rgba(14, 165, 233, 0.12);
+}
+
 

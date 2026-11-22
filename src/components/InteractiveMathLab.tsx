@@ -17,6 +17,7 @@ import {
   evaluateQuadratic,
   evaluateTrigSightline,
 } from '../utils/adaptiveEngine';
+import { getPerformanceCadence } from '../utils/performanceMode';
 
 type LabSimulationMode = 'quadratic' | 'trigonometry' | 'mensuration3d';
 
@@ -24,12 +25,14 @@ interface InteractiveMathLabProps {
   grade?: GradeLevel;
   board?: CurriculumBoard;
   adaptiveRating?: number;
+  performanceMode?: boolean;
 }
 
 export const InteractiveMathLab: React.FC<InteractiveMathLabProps> = ({
   grade = '10',
   board = 'ICSE',
   adaptiveRating = 1358,
+  performanceMode = false,
 }) => {
   const [mode, setMode] = useState<LabSimulationMode>('mensuration3d');
   const [viewDimension, setViewDimension] = useState<'3D' | '2D'>('3D');
@@ -98,10 +101,12 @@ export const InteractiveMathLab: React.FC<InteractiveMathLabProps> = ({
   const coneVolume = (1 / 3) * Math.PI * coneRadius * coneRadius * coneHeight;
   const equivalentSphereRadius = Math.cbrt((coneRadius * coneRadius * coneHeight) / 4);
 
-  // Initialize Three.js Scene once (following Three.js skill software-WebGL + on-demand requestRender rules)
+  // Initialize Three.js Scene (adapts precision & cadence when Performance Mode is active)
   useEffect(() => {
     const container = threeMountRef.current;
     if (!container) return;
+
+    const cadence = getPerformanceCadence(performanceMode);
 
     const isSoftwareGl = (() => {
       const probeCanvas = document.createElement('canvas');
@@ -114,11 +119,13 @@ export const InteractiveMathLab: React.FC<InteractiveMathLabProps> = ({
       return /SwiftShader|llvmpipe|softpipe|Software|Basic Render/i.test(gpu);
     })();
 
+    const useReducedPrecision = isSoftwareGl || performanceMode;
+
     let renderer: THREE.WebGLRenderer;
     try {
       renderer = new THREE.WebGLRenderer({
-        antialias: !isSoftwareGl,
-        powerPreference: 'high-performance',
+        antialias: !useReducedPrecision,
+        powerPreference: performanceMode ? 'low-power' : 'high-performance',
       });
     } catch {
       return;
@@ -127,11 +134,13 @@ export const InteractiveMathLab: React.FC<InteractiveMathLabProps> = ({
     const width = container.clientWidth || 720;
     const height = container.clientHeight || 420;
     renderer.setSize(width, height);
-    renderer.setPixelRatio(isSoftwareGl ? 1 : Math.min(window.devicePixelRatio || 1, 2));
+    renderer.setPixelRatio(
+      useReducedPrecision ? 1 : Math.min(window.devicePixelRatio || 1, cadence.maxPixelRatio)
+    );
     renderer.outputColorSpace = THREE.SRGBColorSpace;
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
     renderer.toneMappingExposure = 1.1;
-    renderer.shadowMap.enabled = !isSoftwareGl;
+    renderer.shadowMap.enabled = !useReducedPrecision && cadence.enableShadows;
     renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 
     container.innerHTML = '';
@@ -143,14 +152,15 @@ export const InteractiveMathLab: React.FC<InteractiveMathLabProps> = ({
 
     // Mandatory RoomEnvironment studio reflection
     const pmremGenerator = new THREE.PMREMGenerator(renderer);
-    scene.environment = pmremGenerator.fromScene(new RoomEnvironment(), 0.04).texture;
+    const envTarget = pmremGenerator.fromScene(new RoomEnvironment(), 0.04);
+    scene.environment = envTarget.texture;
     pmremGenerator.dispose();
 
     const camera = new THREE.PerspectiveCamera(45, width / height, 0.1, 120);
     camera.position.set(8.5, 6.2, 10.5);
 
     const controls = new OrbitControls(camera, renderer.domElement);
-    controls.enableDamping = !isSoftwareGl;
+    controls.enableDamping = !useReducedPrecision && cadence.enableDamping;
     controls.dampingFactor = 0.06;
     controls.minDistance = 4;
     controls.maxDistance = 28;
@@ -162,7 +172,7 @@ export const InteractiveMathLab: React.FC<InteractiveMathLabProps> = ({
 
     const keyLight = new THREE.DirectionalLight(0xfffbeb, 2.2);
     keyLight.position.set(10, 16, 10);
-    if (!isSoftwareGl) {
+    if (!useReducedPrecision && cadence.enableShadows) {
       keyLight.castShadow = true;
       keyLight.shadow.mapSize.set(1024, 1024);
       keyLight.shadow.bias = -0.0005;
@@ -200,18 +210,19 @@ export const InteractiveMathLab: React.FC<InteractiveMathLabProps> = ({
       roughness: 0.65,
       metalness: 0.3,
     });
-    const pedestalBase = new THREE.Mesh(new THREE.CylinderGeometry(2.4, 2.6, 0.24, 32), pedestalMat);
+    const radialSegs = cadence.radialSegments;
+    const pedestalBase = new THREE.Mesh(new THREE.CylinderGeometry(2.4, 2.6, 0.24, radialSegs), pedestalMat);
     pedestalBase.position.set(-2.3, 0.12, 0);
     mensurationGroup.add(pedestalBase);
 
-    const coneGeo = new THREE.ConeGeometry(1.8, 3.2, 32, 1);
+    const coneGeo = new THREE.ConeGeometry(1.8, 3.2, radialSegs, 1);
     const coneMat = new THREE.MeshPhysicalMaterial({
       color: 0x0284c7,
       roughness: 0.25,
       metalness: 0.15,
       transparent: true,
       opacity: 0.68,
-      clearcoat: 0.8,
+      clearcoat: performanceMode ? 0 : 0.8,
     });
     const coneMesh = new THREE.Mesh(coneGeo, coneMat);
     coneMesh.position.set(-2.3, 1.84, 0);
@@ -229,22 +240,22 @@ export const InteractiveMathLab: React.FC<InteractiveMathLabProps> = ({
       roughness: 0.3,
       metalness: 0.7,
     });
-    const altitudeLine = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.06, 3.2, 12), altitudeMat);
+    const altitudeLine = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.06, 3.2, 10), altitudeMat);
     altitudeLine.position.set(-2.3, 1.84, 0);
     mensurationGroup.add(altitudeLine);
 
-    const radiusRod = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.05, 1.8, 12), altitudeMat);
+    const radiusRod = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.05, 1.8, 10), altitudeMat);
     radiusRod.rotation.z = Math.PI / 2;
     radiusRod.position.set(-1.4, 0.26, 0);
     mensurationGroup.add(radiusRod);
 
     // Recast Equivalent Sphere on Right Pedestal
-    const spherePedestal = new THREE.Mesh(new THREE.CylinderGeometry(2.0, 2.2, 0.24, 32), pedestalMat);
+    const spherePedestal = new THREE.Mesh(new THREE.CylinderGeometry(2.0, 2.2, 0.24, radialSegs), pedestalMat);
     spherePedestal.position.set(2.5, 0.12, 0);
     mensurationGroup.add(spherePedestal);
 
     const recastSphere = new THREE.Mesh(
-      new THREE.SphereGeometry(1.35, 32, 24),
+      new THREE.SphereGeometry(1.35, radialSegs, Math.max(10, Math.floor(radialSegs * 0.75))),
       new THREE.MeshStandardMaterial({
         color: 0xf59e0b,
         roughness: 0.22,
@@ -255,7 +266,7 @@ export const InteractiveMathLab: React.FC<InteractiveMathLabProps> = ({
     mensurationGroup.add(recastSphere);
 
     const recastRing = new THREE.Mesh(
-      new THREE.TorusGeometry(1.55, 0.04, 12, 48),
+      new THREE.TorusGeometry(1.55, 0.04, 8, performanceMode ? 20 : 48),
       new THREE.MeshStandardMaterial({ color: 0x38bdf8, roughness: 0.3, metalness: 0.6 })
     );
     recastRing.rotation.x = Math.PI / 2;
@@ -267,7 +278,7 @@ export const InteractiveMathLab: React.FC<InteractiveMathLabProps> = ({
     surfaceGroup.visible = false;
     scene.add(surfaceGroup);
 
-    const segs = 36;
+    const segs = cadence.surfaceSegments;
     const surfGeo = new THREE.PlaneGeometry(7, 7, segs, segs);
     surfGeo.rotateX(-Math.PI / 2);
     const surfMat = new THREE.MeshStandardMaterial({
@@ -442,23 +453,37 @@ export const InteractiveMathLab: React.FC<InteractiveMathLabProps> = ({
           if (renderDirty) requestRender();
         };
         if (isSoftwareGl) afterDraw(done);
-        else done();
+        else if (cadence.threeFrameThrottleMs > 0) {
+          frameId = window.setTimeout(done, cadence.threeFrameThrottleMs);
+        } else {
+          done();
+        }
       });
     }
 
     requestRenderRef.current = requestRender;
     controls.addEventListener('change', requestRender);
 
+    let resizeRafId: number | null = null;
     const handleResize = () => {
-      if (!container) return;
-      const w = container.clientWidth || 720;
-      const h = container.clientHeight || 420;
-      camera.aspect = w / h;
-      camera.updateProjectionMatrix();
-      renderer.setSize(w, h);
-      requestRender();
+      if (resizeRafId !== null) cancelAnimationFrame(resizeRafId);
+      resizeRafId = requestAnimationFrame(() => {
+        resizeRafId = null;
+        if (!container) return;
+        const w = Math.max(240, Math.floor(container.clientWidth));
+        const h = Math.max(240, Math.floor(container.clientHeight));
+        camera.aspect = w / h;
+        camera.updateProjectionMatrix();
+        renderer.setSize(w, h, false);
+        requestRender();
+      });
     };
-    window.addEventListener('resize', handleResize);
+    window.addEventListener('resize', handleResize, { passive: true });
+    let resizeObserver: ResizeObserver | null = null;
+    if (typeof ResizeObserver !== 'undefined') {
+      resizeObserver = new ResizeObserver(handleResize);
+      resizeObserver.observe(container);
+    }
 
     if (!isSoftwareGl) {
       renderer.compile(scene, camera);
@@ -466,14 +491,25 @@ export const InteractiveMathLab: React.FC<InteractiveMathLabProps> = ({
     requestRender();
 
     return () => {
+      if (resizeRafId !== null) cancelAnimationFrame(resizeRafId);
+      resizeObserver?.disconnect();
       window.removeEventListener('resize', handleResize);
       controls.removeEventListener('change', requestRender);
       cancelAnimationFrame(frameId);
       clearTimeout(frameId);
+      scene.traverse((obj) => {
+        const mesh = obj as THREE.Mesh;
+        if (mesh.geometry) mesh.geometry.dispose();
+        if (mesh.material) {
+          const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+          mats.forEach((m) => m.dispose());
+        }
+      });
+      envTarget.dispose();
       controls.dispose();
       renderer.dispose();
     };
-  }, []);
+  }, [performanceMode]);
 
   // Update 3D Scene geometry dynamically whenever sliders or mode change
   useEffect(() => {
@@ -571,7 +607,7 @@ export const InteractiveMathLab: React.FC<InteractiveMathLabProps> = ({
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
 
-    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const dpr = performanceMode ? 1 : Math.min(window.devicePixelRatio || 1, 2);
     const width = 680;
     const height = 400;
     canvas.width = width * dpr;

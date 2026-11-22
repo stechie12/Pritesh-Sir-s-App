@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { Suspense, lazy, useEffect, useMemo, useState } from 'react';
 import {
   CheckCircle2,
   XCircle,
@@ -33,6 +33,8 @@ import {
   PenLine,
   EyeOff,
   RefreshCw,
+  History,
+  Sliders,
 } from 'lucide-react';
 import {
   SELINA_PROBLEMS,
@@ -55,31 +57,139 @@ import {
   filterProblemsByWeakTopics,
 } from './utils/adaptiveEngine';
 import {
-  auth,
-  googleProvider,
-  onAuthStateChanged,
-  signInWithPopup,
-  signOut,
-  User,
+  subscribeAuthState,
+  signInWithGoogle,
+  signOutFromCloud,
+  type CloudUserLike,
   syncStudentProfileToCloud,
   fetchStudentCloudState,
+  fetchCloudDoubts,
   logAttemptToCloud,
   saveDoubtToCloud,
 } from './firebase';
-import { InteractiveMathLab } from './components/InteractiveMathLab';
 import {
   DoubtTutorPanel,
   SummonableTool,
   TutorMessage,
 } from './components/DoubtTutorPanel';
-import { ParentTeacherDashboard, LessonPlanModule } from './components/ParentTeacherDashboard';
-import { StudyPlannerPanel } from './components/StudyPlannerPanel';
-import { GamificationHub } from './components/GamificationHub';
-import { InteractiveFormulaReference } from './components/InteractiveFormulaReference';
-import { SolutionStepVisualizer } from './components/SolutionStepVisualizer';
-import { KeyboardShortcutsModal } from './components/KeyboardShortcutsModal';
-import { ChapterMasteryRadarChart } from './components/ChapterMasteryRadarChart';
+import { ChatHistoryDrawer } from './components/ChatHistoryDrawer';
+import {
+  type ChatThread,
+  ACTIVE_THREAD_STORAGE_KEY,
+  loadStoredChatThreads,
+  persistChatThreads,
+  upsertMessageInThreads,
+  updateMessageInThreads,
+  deleteThreadById,
+  renameThreadById,
+  togglePinThreadById,
+  mergeCloudDoubtsIntoThreads,
+} from './utils/chatHistory';
+import type { LessonPlanModule } from './components/ParentTeacherDashboard';
+import type { InlineVisualizerSpec } from './utils/visualizerDetector';
 import { OfflineIndicator } from './hooks/usePWAInstall';
+import { usePerformanceMode } from './hooks/usePerformanceMode';
+import { isChunkLoadError, triggerChunkRecoveryReload } from './utils/chunkRecovery';
+import {
+  HUNDRED_FEATURES_CATALOG,
+  type PowerHubTab,
+} from './data/featureSuiteCatalog';
+import {
+  DEFAULT_PEDAGOGY_CONFIG,
+  type TutorPedagogyConfig,
+} from './utils/tutorPedagogy';
+import {
+  DEFAULT_WORKSPACE_PREFS,
+  type EscalatedDoubtItem,
+  type RecentActivityItem,
+  type RevisionNoteItem,
+  type SavedInsightItem,
+  type WorkspacePreferences,
+} from './utils/workspacePreferences';
+
+/**
+ * Retries a dynamic chunk import once after a brief delay for transient blips,
+ * and triggers a single cache-clearing reload if the client shell references a
+ * retired build hash from a previous deployment.
+ */
+function lazyWithRetry<T extends React.ComponentType<any>>(
+  factory: () => Promise<{ default: T }>
+) {
+  return lazy(async () => {
+    try {
+      return await factory();
+    } catch (firstErr) {
+      await new Promise((resolve) => setTimeout(resolve, 350));
+      try {
+        return await factory();
+      } catch (secondErr) {
+        if (isChunkLoadError(secondErr) || isChunkLoadError(firstErr)) {
+          if (triggerChunkRecoveryReload()) {
+            // Keep Suspense fallback visible while the browser refreshes to the latest bundle
+            return new Promise<never>(() => {});
+          }
+        }
+        throw secondErr;
+      }
+    }
+  });
+}
+
+const InteractiveFormulaReference = lazyWithRetry(() =>
+  import('./components/InteractiveFormulaReference').then((m) => ({
+    default: m.InteractiveFormulaReference,
+  }))
+);
+const SimulationsLibraryModal = lazyWithRetry(() =>
+  import('./components/SimulationsLibraryModal').then((m) => ({
+    default: m.SimulationsLibraryModal,
+  }))
+);
+const KeyboardShortcutsModal = lazyWithRetry(() =>
+  import('./components/KeyboardShortcutsModal').then((m) => ({
+    default: m.KeyboardShortcutsModal,
+  }))
+);
+const PowerHubModal = lazyWithRetry(() =>
+  import('./components/PowerHubModal').then((m) => ({
+    default: m.PowerHubModal,
+  }))
+);
+const InteractiveMathLab = lazyWithRetry(() =>
+  import('./components/InteractiveMathLab').then((m) => ({ default: m.InteractiveMathLab }))
+);
+const ParentTeacherDashboard = lazyWithRetry(() =>
+  import('./components/ParentTeacherDashboard').then((m) => ({ default: m.ParentTeacherDashboard }))
+);
+const StudyPlannerPanel = lazyWithRetry(() =>
+  import('./components/StudyPlannerPanel').then((m) => ({ default: m.StudyPlannerPanel }))
+);
+const GamificationHub = lazyWithRetry(() =>
+  import('./components/GamificationHub').then((m) => ({ default: m.GamificationHub }))
+);
+const SolutionStepVisualizer = lazyWithRetry(() =>
+  import('./components/SolutionStepVisualizer').then((m) => ({
+    default: m.SolutionStepVisualizer,
+  }))
+);
+const ChapterMasteryRadarChart = lazyWithRetry(() =>
+  import('./components/ChapterMasteryRadarChart').then((m) => ({
+    default: m.ChapterMasteryRadarChart,
+  }))
+);
+
+function SectionLoadingFallback({ label }: { label: string }) {
+  return (
+    <div
+      role="status"
+      aria-live="polite"
+      className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white/80 dark:bg-slate-900/70 p-6 flex items-center justify-center gap-3 text-xs font-medium text-slate-600 dark:text-slate-300"
+    >
+      <span className="inline-block w-4 h-4 rounded-full border-2 border-sky-500/30 border-t-sky-500 animate-spin" />
+      <span>Loading {label}…</span>
+    </div>
+  );
+}
 import { copyTextSafely, safeStorageGet, safeStorageSet } from './utils/tutorEnhancements';
 import { readVersionedStorage, writeVersionedStorage } from './utils/storageSafety';
 import {
@@ -198,10 +308,12 @@ export default function App() {
   const [showSummonMenu, setShowSummonMenu] = useState<boolean>(false);
   const [splitScreenTool, setSplitScreenTool] = useState<SummonableTool | null>(null);
 
-  // Command Palette (Ctrl+K), Shortcuts Modal (?), Formula Reference Drawer, Live Announcer & Scroll-to-Top
+  // Command Palette (Ctrl+K), Shortcuts Modal (?), Formula Reference Drawer, Simulations Library, Live Announcer & Scroll-to-Top
   const [showCommandPalette, setShowCommandPalette] = useState<boolean>(false);
   const [showShortcutsModal, setShowShortcutsModal] = useState<boolean>(false);
   const [showFormulaDrawer, setShowFormulaDrawer] = useState<boolean>(false);
+  const [showSimulationsLibrary, setShowSimulationsLibrary] = useState<boolean>(false);
+  const [initialSimulationSpec, setInitialSimulationSpec] = useState<InlineVisualizerSpec | null>(null);
   const [liveAnnouncement, setLiveAnnouncement] = useState<string>('');
   const [showScrollTop, setShowScrollTop] = useState<boolean>(false);
   const [externalPromptRequest, setExternalPromptRequest] = useState<{
@@ -212,10 +324,35 @@ export default function App() {
   const [pomodoroSec, setPomodoroSec] = useState<number>(25 * 60);
   const [pomodoroActive, setPomodoroActive] = useState<boolean>(false);
 
+  // 100-Feature Power Studio State & Preferences
+  const [showPowerHub, setShowPowerHub] = useState<boolean>(false);
+  const [powerHubTab, setPowerHubTab] = useState<PowerHubTab>('directory');
+  const [powerHubFocusKey, setPowerHubFocusKey] = useState<string>('');
+  const [pedagogy, setPedagogy] = useState<TutorPedagogyConfig>(() =>
+    readVersionedStorage<TutorPedagogyConfig>('psma_pedagogy_v1', 1, DEFAULT_PEDAGOGY_CONFIG)
+  );
+  const [prefs, setPrefs] = useState<WorkspacePreferences>(() =>
+    readVersionedStorage<WorkspacePreferences>('psma_workspace_prefs_v1', 1, DEFAULT_WORKSPACE_PREFS)
+  );
+  const performanceStatus = usePerformanceMode(
+    prefs.performanceMode ?? 'auto',
+    prefs.lowGpuMode
+  );
+  const [revisionNotes, setRevisionNotes] = useState<RevisionNoteItem[]>(() =>
+    readVersionedStorage<RevisionNoteItem[]>('psma_revision_notes_v1', 1, [])
+  );
+  const [savedInsights, setSavedInsights] = useState<SavedInsightItem[]>(() =>
+    readVersionedStorage<SavedInsightItem[]>('psma_saved_insights_v1', 1, [])
+  );
+  const [escalatedDoubts, setEscalatedDoubts] = useState<EscalatedDoubtItem[]>(() =>
+    readVersionedStorage<EscalatedDoubtItem[]>('psma_escalations_v1', 1, [])
+  );
+  const [recentActivities, setRecentActivities] = useState<RecentActivityItem[]>(() =>
+    readVersionedStorage<RecentActivityItem[]>('psma_recent_activities_v1', 1, [])
+  );
+
   // Student Curriculum & Adaptive State (Auto-detected from chat or toggled in summoned tools)
-  const [user, setUser] = useState<
-    User | { uid: string; displayName: string | null; email: string | null } | null
-  >(() => {
+  const [user, setUser] = useState<CloudUserLike | null>(() => {
     const savedScholar = safeStorageGet('selina_scholar_session');
     if (savedScholar) {
       try {
@@ -301,10 +438,31 @@ export default function App() {
   });
   const [blitzInput, setBlitzInput] = useState<string>('');
 
-  // Tutor Conversation State (Starts empty for ultra-clean ChatGPT/Gem landing)
-  const [tutorMessages, setTutorMessages] = useState<TutorMessage[]>([]);
+  // Persistent Multi-Thread Chat History State
+  const [chatThreads, setChatThreads] = useState<ChatThread[]>(() => loadStoredChatThreads());
+  const [activeThreadId, setActiveThreadId] = useState<string | null>(() => {
+    const savedId = readVersionedStorage<string | null>(ACTIVE_THREAD_STORAGE_KEY, 1, null);
+    if (!savedId) return null;
+    const existing = loadStoredChatThreads();
+    return existing.some((t) => t.id === savedId) ? savedId : null;
+  });
+  const [showChatHistory, setShowChatHistory] = useState<boolean>(false);
+
+  const tutorMessages = useMemo<TutorMessage[]>(() => {
+    if (!activeThreadId) return [];
+    return chatThreads.find((t) => t.id === activeThreadId)?.messages ?? [];
+  }, [chatThreads, activeThreadId]);
+
   const [lessonPlan, setLessonPlan] = useState(INITIAL_LESSON_PLAN);
   const [isRefreshingPlan, setIsRefreshingPlan] = useState(false);
+
+  useEffect(() => {
+    persistChatThreads(chatThreads);
+  }, [chatThreads]);
+
+  useEffect(() => {
+    writeVersionedStorage(ACTIVE_THREAD_STORAGE_KEY, 1, activeThreadId);
+  }, [activeThreadId]);
 
   // Sync dark mode, high contrast, and persisted curriculum preferences
   useEffect(() => {
@@ -424,9 +582,72 @@ export default function App() {
     safeStorageSet('selina_attempts', JSON.stringify(attempts));
   }, [adaptiveRating, attempts]);
 
-  // Listen for Firebase Auth state & pull cloud profile (preserves active preview scholar session if iframe blocks third-party cookies)
+  // Persist 100-Feature Studio preferences, pedagogy, notes, insights & apply Fluent themes to <html>
   useEffect(() => {
-    const unsub = onAuthStateChanged(auth, async (currentUser) => {
+    writeVersionedStorage('psma_pedagogy_v1', 1, pedagogy);
+  }, [pedagogy]);
+
+  useEffect(() => {
+    writeVersionedStorage('psma_workspace_prefs_v1', 1, prefs);
+    const root = document.documentElement;
+    root.setAttribute('data-accent', prefs.accent);
+    root.setAttribute('data-backdrop', prefs.backdrop);
+    root.setAttribute('data-density', prefs.density);
+    root.classList.toggle('dyslexia-mode', prefs.dyslexiaMode);
+    root.classList.toggle('low-gpu-mode', prefs.lowGpuMode);
+    root.classList.toggle('performance-mode', performanceStatus.isActive);
+    root.classList.toggle('presentation-mode', prefs.presentationMode);
+  }, [prefs, performanceStatus.isActive]);
+
+  useEffect(() => {
+    writeVersionedStorage('psma_revision_notes_v1', 1, revisionNotes);
+  }, [revisionNotes]);
+
+  useEffect(() => {
+    writeVersionedStorage('psma_saved_insights_v1', 1, savedInsights);
+  }, [savedInsights]);
+
+  useEffect(() => {
+    writeVersionedStorage('psma_escalations_v1', 1, escalatedDoubts);
+  }, [escalatedDoubts]);
+
+  useEffect(() => {
+    writeVersionedStorage('psma_recent_activities_v1', 1, recentActivities);
+  }, [recentActivities]);
+
+  const openPowerStudio = (tab: PowerHubTab = 'directory', focusKey = '') => {
+    setPowerHubTab(tab);
+    setPowerHubFocusKey(focusKey);
+    setShowPowerHub(true);
+  };
+
+  const handleTrackStudioActivity = (label: string, hubTab: PowerHubTab, focusKey: string) => {
+    setRecentActivities((prev) => [
+      { id: `act_${Date.now()}`, label, hubTab, focusKey, timestamp: Date.now() },
+      ...prev.filter((item) => item.label !== label).slice(0, 9),
+    ]);
+  };
+
+  const handleSaveInsight = (item: SavedInsightItem) => {
+    setSavedInsights((prev) => [item, ...prev.filter((i) => i.id !== item.id).slice(0, 49)]);
+  };
+
+  const handleSendToNotes = (title: string, chapter: string, body: string) => {
+    setRevisionNotes((prev) => [
+      {
+        id: `note_${Date.now()}`,
+        title: title || 'Saved Maths Explanation',
+        chapter,
+        body,
+        updatedAt: new Date().toISOString(),
+      },
+      ...prev.slice(0, 39),
+    ]);
+  };
+
+  // Lazy Firebase Auth listener (deferred via dynamic import so mobile boot stays instant)
+  useEffect(() => {
+    const unsub = subscribeAuthState(async (currentUser) => {
       if (currentUser) {
         setUser(currentUser);
         try {
@@ -448,6 +669,10 @@ export default function App() {
           }
           if (cloudData?.attempts && cloudData.attempts.length > 0) {
             setAttempts(cloudData.attempts);
+          }
+          const cloudDoubts = await fetchCloudDoubts(currentUser.uid);
+          if (cloudDoubts.length > 0) {
+            setChatThreads((prev) => mergeCloudDoubtsIntoThreads(prev, cloudDoubts));
           }
         } catch {
           // Offline or initial profile creation handled on next sync
@@ -848,6 +1073,8 @@ export default function App() {
           setShowShortcutsModal(false);
         } else if (showCommandPalette) {
           setShowCommandPalette(false);
+        } else if (showSimulationsLibrary) {
+          setShowSimulationsLibrary(false);
         } else if (showFormulaDrawer) {
           setShowFormulaDrawer(false);
         }
@@ -875,7 +1102,20 @@ export default function App() {
         return;
       }
 
-      if (activeSection === 'practice' && !showCommandPalette && !showShortcutsModal && !showFormulaDrawer) {
+      if (e.key.toLowerCase() === 's') {
+        e.preventDefault();
+        setInitialSimulationSpec(null);
+        setShowSimulationsLibrary((prev) => !prev);
+        return;
+      }
+
+      if (
+        activeSection === 'practice' &&
+        !showCommandPalette &&
+        !showShortcutsModal &&
+        !showFormulaDrawer &&
+        !showSimulationsLibrary
+      ) {
         const lower = e.key.toLowerCase();
         if (submittedResult === null) {
           const optIdxMap: Record<string, number> = {
@@ -917,6 +1157,7 @@ export default function App() {
     showShortcutsModal,
     showCommandPalette,
     showFormulaDrawer,
+    showSimulationsLibrary,
     activeSection,
     submittedResult,
     selectedOptionIndex,
@@ -928,7 +1169,7 @@ export default function App() {
   const handleGoogleAuth = async () => {
     if (user) {
       try {
-        await signOut(auth);
+        await signOutFromCloud();
       } catch {
         // Ignore signOut errors in preview sandbox
       }
@@ -939,17 +1180,17 @@ export default function App() {
     }
     try {
       setAuthStatusText(null);
-      const cred = await signInWithPopup(auth, googleProvider);
-      if (cred.user) {
+      const signedInUser = await signInWithGoogle();
+      if (signedInUser) {
         const scholarProfile = {
-          uid: cred.user.uid,
-          displayName: cred.user.displayName || 'Shivesh Joshi',
-          email: cred.user.email || 'shiveshjjoshi@gmail.com',
+          uid: signedInUser.uid,
+          displayName: signedInUser.displayName || 'Shivesh Joshi',
+          email: signedInUser.email || 'shiveshjjoshi@gmail.com',
         };
         safeStorageSet('selina_scholar_session', JSON.stringify(scholarProfile));
-        setUser(cred.user);
+        setUser(signedInUser);
         await syncStudentProfileToCloud({
-          uid: cred.user.uid,
+          uid: signedInUser.uid,
           displayName: scholarProfile.displayName,
           grade,
           board,
@@ -989,10 +1230,58 @@ export default function App() {
     }
   };
 
-  const handleSaveDoubtToCloud = async (msg: TutorMessage) => {
-    setTutorMessages((prev) =>
-      prev.map((m) => (m.id === msg.id ? { ...m, savedToCloud: true } : m))
+  const handleNewTutorMessage = (msg: TutorMessage) => {
+    setChatThreads((prevThreads) => {
+      const next = upsertMessageInThreads(prevThreads, activeThreadId, msg, grade, board);
+      setActiveThreadId(next.activeThreadId);
+      return next.threads;
+    });
+  };
+
+  const handleUpdateTutorMessage = (id: string, updater: (prev: TutorMessage) => TutorMessage) => {
+    setChatThreads((prevThreads) =>
+      updateMessageInThreads(prevThreads, activeThreadId, id, updater)
     );
+  };
+
+  const handleStartNewChat = () => {
+    setActiveThreadId(null);
+    setSplitScreenTool(null);
+    setActiveSection('tutor');
+  };
+
+  const handleSelectChatThread = (threadId: string) => {
+    const target = chatThreads.find((t) => t.id === threadId);
+    if (!target) return;
+    setActiveThreadId(threadId);
+    setGrade(target.grade);
+    setBoard(target.board);
+    setActiveSection('tutor');
+  };
+
+  const handleDeleteChatThread = (threadId: string) => {
+    setChatThreads((prev) => {
+      const next = deleteThreadById(prev, threadId, activeThreadId);
+      setActiveThreadId(next.activeThreadId);
+      return next.threads;
+    });
+  };
+
+  const handleRenameChatThread = (threadId: string, nextTitle: string) => {
+    setChatThreads((prev) => renameThreadById(prev, threadId, nextTitle));
+  };
+
+  const handleTogglePinChatThread = (threadId: string) => {
+    setChatThreads((prev) => togglePinThreadById(prev, threadId));
+  };
+
+  const handleClearAllChatThreads = () => {
+    setChatThreads([]);
+    setActiveThreadId(null);
+  };
+
+  const handleSaveDoubtToCloud = async (msg: TutorMessage) => {
+    handleUpdateTutorMessage(msg.id, (m) => ({ ...m, savedToCloud: true }));
     if (user) {
       try {
         await saveDoubtToCloud(user.uid, {
@@ -1001,7 +1290,10 @@ export default function App() {
           board,
           topic: msg.conceptTitle,
           question: msg.question,
-          answer: `${msg.steps.join(' ')} | Final: ${msg.finalAnswer}`,
+          answer:
+            msg.responseType === 'chat'
+              ? msg.chatReply || ''
+              : `${msg.steps.join(' ')} | Final: ${msg.finalAnswer}`,
         });
       } catch {
         // Local state already marked saved
@@ -1033,7 +1325,17 @@ export default function App() {
     }
   };
 
+  const openSimulationsLibrary = (spec?: InlineVisualizerSpec | null) => {
+    setInitialSimulationSpec(spec ?? null);
+    setShowSimulationsLibrary(true);
+  };
+
   const commandActions = [
+    {
+      label: 'Open Interactive Simulations Library (8 Live Math Labs)',
+      category: 'Simulations',
+      run: () => openSimulationsLibrary(null),
+    },
     {
       label: 'Open Interactive Formula Reference (LaTeX Formula Sheets)',
       category: 'Reference',
@@ -1134,17 +1436,39 @@ export default function App() {
       run: () => setHighContrast((prev) => !prev),
     },
     {
+      label: 'Open Chat History',
+      category: 'Conversations',
+      run: () => setShowChatHistory(true),
+    },
+    {
+      label: 'Start a New Chat',
+      category: 'Conversations',
+      run: () => handleStartNewChat(),
+    },
+    {
       label: 'Show Keyboard Shortcuts (?)',
       category: 'Accessibility',
       run: () => setShowShortcutsModal(true),
     },
+    {
+      label: 'Open 100-Feature Power Studio (All Labs, Drills, Themes & Pedagogy)',
+      category: 'Power Studio',
+      run: () => openPowerStudio('directory'),
+    },
+    ...HUNDRED_FEATURES_CATALOG.map((feat) => ({
+      label: `#${feat.id} ${feat.title} — ${feat.summary}`,
+      category: feat.category,
+      run: () => openPowerStudio(feat.hubTab, feat.focusKey),
+    })),
   ];
 
-  const filteredCommands = commandActions.filter(
-    (c) =>
-      c.label.toLowerCase().includes(commandSearch.toLowerCase()) ||
-      c.category.toLowerCase().includes(commandSearch.toLowerCase())
-  );
+  const filteredCommands = commandActions
+    .filter(
+      (c) =>
+        c.label.toLowerCase().includes(commandSearch.toLowerCase()) ||
+        c.category.toLowerCase().includes(commandSearch.toLowerCase())
+    )
+    .slice(0, 40);
 
   const formatTimer = (sec: number) => {
     const m = Math.floor(sec / 60);
@@ -1167,17 +1491,46 @@ export default function App() {
         {liveAnnouncement}
       </div>
 
-      {/* Ultra-Clean Minimalist 3-Zone Top Header */}
-      <header className="sticky top-0 z-40 flex items-center justify-between gap-2 sm:gap-4 px-3.5 py-2.5 sm:px-6 sm:py-3 border-b border-slate-200/60 dark:border-slate-800/70 bg-white/80 dark:bg-slate-950/80 fluent-acrylic">
-        {/* Zone 1: App Title & New Chat Reset */}
+      {/* #78 Zen Mode Exit Pill or Windows 11 Fluent Acrylic Top Header */}
+      {prefs.zenMode ? (
+        <div className="fixed top-3 right-3 z-40">
+          <button
+            type="button"
+            onClick={() => setPrefs((p) => ({ ...p, zenMode: false }))}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl fluent-glass-card text-xs font-semibold text-slate-700 dark:text-slate-100"
+          >
+            <X className="w-3.5 h-3.5" />
+            <span>Exit Zen</span>
+          </button>
+        </div>
+      ) : (
+      <header className="sticky top-0 z-40 flex items-center justify-between gap-2 sm:gap-4 px-3.5 py-2.5 sm:px-6 sm:py-3 border-b fluent-acrylic-bar">
+        {/* Zone 1: History Drawer Toggle, App Title & New Chat */}
         <div className="flex items-center gap-2 sm:gap-3 min-w-0">
+          <button
+            type="button"
+            data-testid="header-history-btn"
+            onClick={() => setShowChatHistory(true)}
+            aria-label="Open chat history"
+            title="Chat History"
+            className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl fluent-control text-xs font-medium text-slate-700 dark:text-slate-100 whitespace-nowrap shrink-0"
+          >
+            <History className="w-3.5 h-3.5 text-sky-600 dark:text-sky-400" />
+            <span className="hidden sm:inline">History</span>
+            {chatThreads.length > 0 && (
+              <span className="text-[11px] font-mono tabular-nums text-slate-500 dark:text-slate-400">
+                {chatThreads.length}
+              </span>
+            )}
+          </button>
+
           <a
             href="#top"
             onClick={(e) => {
               e.preventDefault();
               setActiveSection('tutor');
             }}
-            className="text-sm font-semibold tracking-tight text-slate-900 dark:text-white truncate font-display"
+            className="text-sm font-semibold tracking-tight text-slate-900 dark:text-white truncate font-display hover:text-sky-600 dark:hover:text-sky-300 transition-colors"
           >
             Pritesh Sir&apos;s Maths App!
           </a>
@@ -1185,13 +1538,10 @@ export default function App() {
           {tutorMessages.length > 0 && (
             <button
               type="button"
-              onClick={() => {
-                setTutorMessages([]);
-                setSplitScreenTool(null);
-                setActiveSection('tutor');
-              }}
-              title="Start a clean chat"
-              className="inline-flex items-center gap-1 text-xs text-slate-500 hover:text-slate-900 dark:hover:text-white transition-colors shrink-0"
+              data-testid="header-new-chat-btn"
+              onClick={handleStartNewChat}
+              title="Start a new chat (current chat is saved in History)"
+              className="inline-flex items-center gap-1 px-2 py-1 rounded-lg text-xs text-slate-600 dark:text-slate-300 hover:bg-white/70 dark:hover:bg-white/10 hover:text-slate-950 dark:hover:text-white transition-colors whitespace-nowrap shrink-0"
             >
               <RotateCcw className="w-3 h-3" />
               <span className="hidden sm:inline">New</span>
@@ -1199,30 +1549,57 @@ export default function App() {
           )}
         </div>
 
-        {/* Clean Right Controls: Practice & Formulas on Tablet/Desktop (Mobile uses Bottom Nav), Accessibility & Theme, Sign-In */}
+        {/* Clean Right Controls: Practice, Simulations, Formulas, Studio (100 Features), Theme, Sign-In */}
         <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
           <button
             type="button"
             data-testid="header-practice-btn"
             onClick={() => handleSummonTool('practice', true)}
-            className={`hidden md:inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-xs font-medium transition-colors whitespace-nowrap shrink-0 ${
+            className={`relative hidden md:inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-medium transition-all whitespace-nowrap shrink-0 ${
               activeSection === 'practice'
-                ? 'border-sky-500/60 bg-sky-500/15 text-sky-600 dark:text-sky-300'
-                : 'border-slate-200 dark:border-slate-800 text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-900'
+                ? 'border border-sky-500/45 bg-sky-500/15 text-sky-700 dark:text-sky-300 shadow-xs'
+                : 'fluent-control text-slate-700 dark:text-slate-100'
             }`}
           >
             <Zap className="w-3.5 h-3.5 text-amber-500" />
             <span>Practice</span>
+            {activeSection === 'practice' && (
+              <span
+                aria-hidden="true"
+                className="absolute bottom-0 left-3 right-3 h-[2px] rounded-full bg-sky-500"
+              />
+            )}
+          </button>
+
+          <button
+            type="button"
+            data-testid="header-simulations-btn"
+            onClick={() => openSimulationsLibrary(null)}
+            className="hidden md:inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl fluent-control text-xs font-medium text-slate-700 dark:text-slate-100 whitespace-nowrap shrink-0"
+          >
+            <Sliders className="w-3.5 h-3.5 text-sky-600 dark:text-sky-400" />
+            <span>Simulations</span>
           </button>
 
           <button
             type="button"
             data-testid="header-formulas-btn"
             onClick={() => setShowFormulaDrawer(true)}
-            className="hidden md:inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-200 dark:border-slate-800 text-xs font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-900 transition-colors whitespace-nowrap shrink-0"
+            className="hidden lg:inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl fluent-control text-xs font-medium text-slate-700 dark:text-slate-100 whitespace-nowrap shrink-0"
           >
             <BookOpen className="w-3.5 h-3.5 text-sky-600 dark:text-sky-400" />
             <span>Formulas</span>
+          </button>
+
+          <button
+            type="button"
+            data-testid="header-studio-btn"
+            onClick={() => openPowerStudio('directory')}
+            title="Open 100-Feature Power Studio (15 Labs, Flashcards, Exam Prep, Voice, Themes & Pedagogy)"
+            className="inline-flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded-xl fluent-control text-xs font-medium text-slate-700 dark:text-slate-100 whitespace-nowrap shrink-0"
+          >
+            <Sparkles className="w-3.5 h-3.5 text-sky-500" />
+            <span>Studio</span>
           </button>
 
           <button
@@ -1231,7 +1608,7 @@ export default function App() {
             onClick={() => setShowShortcutsModal(true)}
             aria-label="Keyboard shortcuts"
             title="Keyboard Shortcuts (?)"
-            className="hidden sm:inline-flex p-2 rounded-lg text-slate-500 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-900 transition-colors shrink-0"
+            className="hidden lg:inline-flex p-2 rounded-xl text-slate-600 dark:text-slate-300 hover:bg-white/75 dark:hover:bg-white/10 transition-colors shrink-0"
           >
             <Keyboard className="w-4 h-4" />
           </button>
@@ -1243,10 +1620,10 @@ export default function App() {
             aria-label="Toggle High Contrast Reading Mode"
             aria-pressed={highContrast}
             title="Toggle High-Contrast Reading Mode"
-            className={`hidden sm:inline-flex p-2 rounded-lg transition-colors shrink-0 ${
+            className={`hidden sm:inline-flex p-2 rounded-xl transition-colors shrink-0 ${
               highContrast
-                ? 'bg-sky-500/20 text-sky-600 dark:text-sky-300'
-                : 'text-slate-500 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-900'
+                ? 'bg-sky-500/20 text-sky-600 dark:text-sky-300 border border-sky-500/35'
+                : 'text-slate-600 dark:text-slate-300 hover:bg-white/75 dark:hover:bg-white/10'
             }`}
           >
             <Contrast className="w-4 h-4" />
@@ -1254,31 +1631,33 @@ export default function App() {
 
           <button
             type="button"
+            data-testid="header-theme-toggle-btn"
             onClick={() => setDarkMode((prev) => !prev)}
             aria-label="Toggle Light or Dark Mode"
-            className="p-2 rounded-lg text-slate-500 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-900 transition-colors shrink-0"
+            className="p-2 rounded-xl text-slate-600 dark:text-slate-300 hover:bg-white/75 dark:hover:bg-white/10 transition-colors shrink-0"
           >
-            {darkMode ? <Sun className="w-4 h-4 text-amber-400" /> : <Moon className="w-4 h-4" />}
+            {darkMode ? <Sun className="w-4 h-4 text-amber-400" /> : <Moon className="w-4 h-4 text-slate-700" />}
           </button>
 
           <button
             type="button"
             onClick={handleGoogleAuth}
-            className="px-3 sm:px-3.5 py-1.5 text-xs font-medium text-white bg-slate-900 dark:bg-sky-600 rounded-lg hover:bg-slate-800 dark:hover:bg-sky-500 transition-colors whitespace-nowrap shrink-0"
+            className="px-3 sm:px-3.5 py-1.5 text-xs font-semibold text-white fluent-primary-btn rounded-xl whitespace-nowrap shrink-0"
           >
             {user ? user.displayName?.split(' ')[0] || 'Synced' : 'Sign in'}
           </button>
         </div>
       </header>
+      )}
 
       {/* Command Palette Modal (Ctrl+K) */}
       {showCommandPalette && (
         <div
-          className="fixed inset-0 z-50 bg-slate-950/60 backdrop-blur-xs flex items-start justify-center pt-20 px-4"
+          className="fixed inset-0 z-50 bg-slate-950/45 dark:bg-slate-950/65 backdrop-blur-md flex items-start justify-center pt-20 px-4"
           onClick={() => setShowCommandPalette(false)}
         >
           <div
-            className="w-full max-w-lg rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 shadow-2xl overflow-hidden"
+            className="w-full max-w-lg rounded-2xl border fluent-glass-panel overflow-hidden"
             onClick={(e) => e.stopPropagation()}
           >
             <div className="flex items-center gap-3 px-4 py-3 border-b border-slate-200 dark:border-slate-800">
@@ -1324,7 +1703,7 @@ export default function App() {
         </div>
       )}
 
-      <main id="main-workspace" className="flex-1 max-w-[1380px] w-full mx-auto px-3 sm:px-6 py-3 sm:py-4 pb-24 md:pb-6">
+      <main id="main-workspace" className="flex-1 min-w-0 max-w-[1380px] w-full mx-auto px-3 sm:px-6 py-3 sm:py-4 pb-24 md:pb-6">
         {authStatusText && (
           <div className="mb-4 max-w-2xl mx-auto rounded-xl border border-sky-500/30 bg-sky-500/10 px-4 py-2 text-xs text-sky-600 dark:text-sky-300 flex items-center justify-between">
             <span>{authStatusText}</span>
@@ -1340,7 +1719,7 @@ export default function App() {
 
         {/* Contextual Curriculum Bar ONLY when viewing a summoned tool tab */}
         {activeSection !== 'tutor' && (
-          <div className="mb-4 sm:mb-6 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 sm:gap-3 rounded-xl border border-slate-200/80 dark:border-slate-800/80 bg-white/80 dark:bg-slate-900/80 px-3 sm:px-4 py-2.5 text-xs">
+          <div className="mb-4 sm:mb-6 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 sm:gap-3 rounded-2xl fluent-glass-subtle px-3.5 sm:px-4 py-2.5 text-xs">
             <div className="flex items-center gap-1.5 sm:gap-2 overflow-x-auto no-scrollbar max-w-full">
               <span className="hidden sm:inline text-slate-500 dark:text-slate-400 whitespace-nowrap shrink-0">
                 Active Context:
@@ -1390,32 +1769,37 @@ export default function App() {
         <div
           className={
             activeSection === 'tutor' && splitScreenTool
-              ? 'grid grid-cols-1 lg:grid-cols-12 gap-6 items-start'
-              : ''
+              ? 'grid grid-cols-1 lg:grid-cols-12 gap-6 items-start min-w-0'
+              : 'min-w-0'
           }
         >
           {activeSection === 'tutor' && (
-            <div className={splitScreenTool ? 'lg:col-span-6' : ''}>
+            <div className={splitScreenTool ? 'lg:col-span-6 min-w-0' : 'min-w-0'}>
               <DoubtTutorPanel
                 grade={grade}
                 board={board}
                 adaptiveRating={adaptiveRating}
                 messages={tutorMessages}
-                onNewMessage={(msg) => setTutorMessages((prev) => [msg, ...prev])}
-                onUpdateMessage={(id, updater) =>
-                  setTutorMessages((prev) => prev.map((m) => (m.id === id ? updater(m) : m)))
-                }
+                onNewMessage={handleNewTutorMessage}
+                onUpdateMessage={handleUpdateTutorMessage}
                 onSaveDoubtToCloud={handleSaveDoubtToCloud}
                 onSummonTool={handleSummonTool}
                 onDetectCurriculum={handleDetectCurriculum}
                 onOpenFormulaReference={() => setShowFormulaDrawer(true)}
+                onOpenSimulationsLibrary={openSimulationsLibrary}
                 externalPromptRequest={externalPromptRequest}
+                pedagogy={pedagogy}
+                prefs={prefs}
+                onSaveInsight={handleSaveInsight}
+                onSendToNotes={handleSendToNotes}
+                onOpenPowerStudio={openPowerStudio}
+                performanceModeActive={performanceStatus.isActive}
               />
             </div>
           )}
 
           {activeSection === 'tutor' && splitScreenTool && (
-            <div className="lg:col-span-6 rounded-2xl border border-slate-200 dark:border-slate-800 bg-white/50 dark:bg-slate-900/40 p-4">
+            <div className="lg:col-span-6 min-w-0 rounded-2xl fluent-glass-card p-4">
               <div className="flex flex-wrap items-center justify-between gap-2 pb-3 mb-3 border-b border-slate-200 dark:border-slate-800 text-xs">
                 <div className="flex flex-wrap items-center gap-1.5">
                   {summonedTabs.map((t) => (
@@ -1443,11 +1827,13 @@ export default function App() {
                 </button>
               </div>
 
+              <Suspense fallback={<SectionLoadingFallback label={TAB_NAMES[splitScreenTool]} />}>
               {splitScreenTool === 'lab' && (
                 <InteractiveMathLab
                   grade={grade}
                   board={board}
                   adaptiveRating={adaptiveRating}
+                  performanceMode={performanceStatus.isActive}
                 />
               )}
 
@@ -1589,24 +1975,28 @@ export default function App() {
                   />
                 </div>
               )}
+              </Suspense>
             </div>
           )}
         </div>
 
         {/* SUMMONED TAB 1: INTERACTIVE 3D SPATIAL MATH LAB */}
         {activeSection === 'lab' && (
-          <InteractiveMathLab
-            grade={grade}
-            board={board}
-            adaptiveRating={adaptiveRating}
-          />
+          <Suspense fallback={<SectionLoadingFallback label="3D Spatial Lab" />}>
+            <InteractiveMathLab
+              grade={grade}
+              board={board}
+              adaptiveRating={adaptiveRating}
+              performanceMode={performanceStatus.isActive}
+            />
+          </Suspense>
         )}
 
         {/* SUMMONED TAB 2: ADAPTIVE SELINA PRACTICE ARENA + 60s BLITZ + MISTAKE VAULT */}
         {activeSection === 'practice' && (
           <div className="space-y-8">
             {/* 60-Second Mental Math Speed Blitz Bar */}
-            <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 p-3.5 sm:p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 sm:gap-4">
+            <div className="rounded-2xl fluent-glass-subtle border-amber-500/35 bg-amber-500/10 p-3.5 sm:p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 sm:gap-4">
               <div className="flex items-start sm:items-center gap-3 min-w-0">
                 <Zap className="w-5 h-5 text-amber-400 shrink-0 mt-0.5 sm:mt-0" />
                 <div className="min-w-0">
@@ -1920,8 +2310,8 @@ export default function App() {
                   </div>
 
                   <div className="grid grid-cols-1 md:grid-cols-12 gap-4 sm:gap-6 items-start">
-                    <div className="no-print hidden md:block md:col-span-5 lg:col-span-4 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 divide-y divide-slate-100 dark:divide-slate-800 overflow-hidden">
-                      <div className="px-4 py-3 bg-slate-50/70 dark:bg-slate-800/50 flex items-center justify-between text-xs font-semibold text-slate-700 dark:text-slate-300">
+                    <div className="no-print hidden md:block md:col-span-5 lg:col-span-4 rounded-2xl fluent-glass-card divide-y divide-slate-200/60 dark:divide-white/10 overflow-hidden">
+                      <div className="px-4 py-3 bg-white/40 dark:bg-white/[0.03] flex items-center justify-between text-xs font-semibold text-slate-700 dark:text-slate-200">
                         <span data-testid="problem-bank-count">
                           {focusWeakTopics
                             ? `Weak Topic Sums (${filteredProblems.length})`
@@ -1929,7 +2319,7 @@ export default function App() {
                         </span>
                         <span className="font-mono tabular-nums">Marks</span>
                       </div>
-                      <div className="max-h-[560px] overflow-y-auto divide-y divide-slate-100 dark:divide-slate-800">
+                      <div className="max-h-[560px] overflow-y-auto divide-y divide-slate-200/50 dark:divide-white/[0.06]">
                         {filteredProblems.map((prob) => {
                           const isSelected = prob.id === activeProblem.id;
                           const solvedBefore = attempts.some(
@@ -1943,8 +2333,8 @@ export default function App() {
                               onClick={() => handleSelectProblem(prob.id)}
                               className={`w-full text-left p-3.5 lg:p-4 transition-colors ${
                                 isSelected
-                                  ? 'bg-sky-50/80 dark:bg-sky-950/30'
-                                  : 'hover:bg-slate-50 dark:hover:bg-slate-800/40'
+                                  ? 'bg-sky-500/12 dark:bg-sky-500/15'
+                                  : 'hover:bg-white/60 dark:hover:bg-white/[0.05]'
                               }`}
                             >
                               <div className="flex items-center justify-between gap-2 text-xs text-slate-500 dark:text-slate-400">
@@ -1969,7 +2359,7 @@ export default function App() {
                       </div>
                     </div>
 
-                    <div className="md:col-span-7 lg:col-span-8 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-4 sm:p-6 space-y-5">
+                    <div className="md:col-span-7 lg:col-span-8 rounded-2xl fluent-glass-card p-4 sm:p-6 space-y-5">
                       <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 dark:border-slate-800 pb-3.5">
                         <div className="text-xs text-slate-500 dark:text-slate-400 flex flex-wrap items-center gap-x-1.5 gap-y-1">
                           <span className="font-mono tabular-nums font-semibold text-slate-700 dark:text-slate-300">
@@ -2323,7 +2713,9 @@ export default function App() {
                             </span>
                           </div>
 
-                          <SolutionStepVisualizer problem={activeProblem} />
+                          <Suspense fallback={<SectionLoadingFallback label="Step Visualizer" />}>
+                            <SolutionStepVisualizer problem={activeProblem} />
+                          </Suspense>
 
                           <div className="space-y-2">
                             <div className="flex items-center justify-between text-[11px] text-slate-500 dark:text-slate-400">
@@ -2387,7 +2779,7 @@ export default function App() {
                 {CONCEPT_RECAP_CARDS.map((card) => (
                   <div
                     key={card.id}
-                    className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-4 space-y-2"
+                    className="rounded-2xl fluent-glass-card p-4 space-y-2"
                   >
                     <div className="text-xs text-slate-500 dark:text-slate-400">
                       Std {card.grade} {card.board} · Bridged from {card.bridgedFrom}
@@ -2395,7 +2787,7 @@ export default function App() {
                     <h4 className="text-sm font-semibold text-slate-900 dark:text-slate-100">
                       {card.title}
                     </h4>
-                    <div className="rounded-lg bg-slate-50 dark:bg-slate-800/70 px-3 py-1.5 font-mono text-xs text-sky-400">
+                    <div className="rounded-xl fluent-glass-subtle px-3 py-1.5 font-mono text-xs text-sky-600 dark:text-sky-400">
                       {card.coreFormula}
                     </div>
                   </div>
@@ -2407,77 +2799,81 @@ export default function App() {
 
         {/* SUMMONED TAB 3: AI-POWERED DYNAMIC STUDY PLANNER */}
         {activeSection === 'planner' && (
-          <StudyPlannerPanel
-            grade={grade}
-            board={board}
-            adaptiveRating={adaptiveRating}
-            weakTopics={masterySummary.weakTopics}
-            pace={studyPace}
-            feedbackMode={plannerFeedback}
-            daysUntilMock={daysUntilMock}
-            tasks={studyTasks}
-            onChangePace={setStudyPace}
-            onChangeFeedbackMode={setPlannerFeedback}
-            onChangeDaysUntilMock={setDaysUntilMock}
-            onToggleTaskComplete={handleToggleTaskComplete}
-            onToggleTaskReminder={handleToggleTaskReminder}
-            onAddCustomTask={handleAddCustomTask}
-          />
+          <Suspense fallback={<SectionLoadingFallback label="Study Planner" />}>
+            <StudyPlannerPanel
+              grade={grade}
+              board={board}
+              adaptiveRating={adaptiveRating}
+              weakTopics={masterySummary.weakTopics}
+              pace={studyPace}
+              feedbackMode={plannerFeedback}
+              daysUntilMock={daysUntilMock}
+              tasks={studyTasks}
+              onChangePace={setStudyPace}
+              onChangeFeedbackMode={setPlannerFeedback}
+              onChangeDaysUntilMock={setDaysUntilMock}
+              onToggleTaskComplete={handleToggleTaskComplete}
+              onToggleTaskReminder={handleToggleTaskReminder}
+              onAddCustomTask={handleAddCustomTask}
+            />
+          </Suspense>
         )}
 
         {/* SUMMONED TAB 4: GAMIFICATION LEAGUE, BADGES & PARENT REPORT */}
         {activeSection === 'dashboard' && (
-          <div className="space-y-10">
-            <GamificationHub
-              totalXp={gamificationStats.totalXp}
-              level={gamificationStats.level}
-              currentLevelXp={gamificationStats.currentLevelXp}
-              nextLevelXp={gamificationStats.nextLevelXp}
-              levelProgressPercent={gamificationStats.levelProgressPercent}
-              streakDays={streakDays}
-              currentGrade={grade}
-              badges={badges}
-              leaderboard={leaderboard}
-            />
+          <Suspense fallback={<SectionLoadingFallback label="League & Parent Report" />}>
+            <div className="space-y-10">
+              <GamificationHub
+                totalXp={gamificationStats.totalXp}
+                level={gamificationStats.level}
+                currentLevelXp={gamificationStats.currentLevelXp}
+                nextLevelXp={gamificationStats.nextLevelXp}
+                levelProgressPercent={gamificationStats.levelProgressPercent}
+                streakDays={streakDays}
+                currentGrade={grade}
+                badges={badges}
+                leaderboard={leaderboard}
+              />
 
-            <ParentTeacherDashboard
-              studentName={user?.displayName || 'Aarav Sharma (Academy Roll #14)'}
-              grade={grade}
-              board={board}
-              adaptiveRating={adaptiveRating}
-              solvedCount={attempts.length}
-              overallAccuracy={masterySummary.overallAccuracy}
-              streakDays={streakDays}
-              chapters={masterySummary.chapters}
-              weakTopics={masterySummary.weakTopics}
-              attempts={attempts}
-              lessonPlan={lessonPlan}
-              isRefreshingPlan={isRefreshingPlan}
-              onRegeneratePlan={handleRegenerateLessonPlan}
-              darkMode={darkMode}
-              onFocusWeakTopics={() => {
-                const weakMatches = filterProblemsByWeakTopics(
-                  SELINA_PROBLEMS,
-                  topWeakTopics.map((item) => item.chapter)
-                );
-                setFocusWeakTopics(true);
-                if (weakMatches.length > 0) {
-                  setSelectedProblemId(weakMatches[0].id);
-                  setSelectedOptionIndex(null);
-                  setSubmittedResult(null);
-                }
-                handleSummonTool('practice', true);
-              }}
-            />
-          </div>
+              <ParentTeacherDashboard
+                studentName={user?.displayName || 'Aarav Sharma (Academy Roll #14)'}
+                grade={grade}
+                board={board}
+                adaptiveRating={adaptiveRating}
+                solvedCount={attempts.length}
+                overallAccuracy={masterySummary.overallAccuracy}
+                streakDays={streakDays}
+                chapters={masterySummary.chapters}
+                weakTopics={masterySummary.weakTopics}
+                attempts={attempts}
+                lessonPlan={lessonPlan}
+                isRefreshingPlan={isRefreshingPlan}
+                onRegeneratePlan={handleRegenerateLessonPlan}
+                darkMode={darkMode}
+                onFocusWeakTopics={() => {
+                  const weakMatches = filterProblemsByWeakTopics(
+                    SELINA_PROBLEMS,
+                    topWeakTopics.map((item) => item.chapter)
+                  );
+                  setFocusWeakTopics(true);
+                  if (weakMatches.length > 0) {
+                    setSelectedProblemId(weakMatches[0].id);
+                    setSelectedOptionIndex(null);
+                    setSubmittedResult(null);
+                  }
+                  handleSummonTool('practice', true);
+                }}
+              />
+            </div>
+          </Suspense>
         )}
       </main>
 
-      {/* Mobile Bottom Navigation Bar (< md) */}
+      {/* Mobile Bottom Acrylic Navigation Bar (< md) */}
       <nav
         aria-label="Mobile navigation"
         data-testid="mobile-bottom-nav"
-        className="md:hidden fixed bottom-0 inset-x-0 z-40 border-t border-slate-200/80 dark:border-slate-800/80 bg-white/95 dark:bg-slate-950/95 fluent-acrylic safe-area-bottom"
+        className="md:hidden fixed bottom-0 inset-x-0 z-40 border-t fluent-acrylic-bar safe-area-bottom"
       >
         <div className="grid grid-cols-5">
           {[
@@ -2537,12 +2933,18 @@ export default function App() {
                 data-testid={`mobile-nav-${item.id}`}
                 aria-current={item.active ? 'page' : undefined}
                 onClick={item.onClick}
-                className={`flex flex-col items-center justify-center gap-0.5 py-2 min-h-[56px] text-[10px] font-medium transition-colors ${
+                className={`relative flex flex-col items-center justify-center gap-0.5 py-2 min-h-[56px] text-[10px] font-medium transition-colors ${
                   item.active
-                    ? 'text-sky-600 dark:text-sky-400'
+                    ? 'text-sky-600 dark:text-sky-400 font-semibold'
                     : 'text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'
                 }`}
               >
+                {item.active && (
+                  <span
+                    aria-hidden="true"
+                    className="absolute top-0 left-4 right-4 h-[2.5px] rounded-full bg-sky-500"
+                  />
+                )}
                 <Icon className="w-4 h-4 shrink-0" />
                 <span>{item.label}</span>
               </button>
@@ -2551,34 +2953,160 @@ export default function App() {
         </div>
       </nav>
 
-      {/* Floating Scroll-to-Top Button (clears mobile bottom nav cleanly) */}
+      {/* Floating Scroll-to-Top Button (clears mobile bottom nav and docked chat composer cleanly) */}
       {showScrollTop && (
         <button
           type="button"
           onClick={() => window.scrollTo({ top: 0, behavior: 'smooth' })}
           aria-label="Scroll to top"
-          className="no-print fixed right-4 bottom-20 md:bottom-6 z-40 p-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-white/95 dark:bg-slate-900/95 text-slate-700 dark:text-slate-200 shadow-lg hover:border-sky-500 transition-colors"
+          className={`no-print ${
+            activeSection === 'tutor' ? 'hidden md:inline-flex' : 'inline-flex'
+          } fixed right-4 bottom-20 md:bottom-6 z-40 p-2.5 rounded-xl fluent-glass-card text-slate-700 dark:text-slate-100 hover:border-sky-500/60 transition-colors`}
         >
           <ArrowUp className="w-4 h-4" />
         </button>
       )}
 
-      <KeyboardShortcutsModal
-        isOpen={showShortcutsModal}
-        onClose={() => setShowShortcutsModal(false)}
-      />
+      {showShortcutsModal && (
+        <Suspense fallback={null}>
+          <KeyboardShortcutsModal
+            isOpen={showShortcutsModal}
+            onClose={() => setShowShortcutsModal(false)}
+          />
+        </Suspense>
+      )}
 
-      <InteractiveFormulaReference
-        isOpen={showFormulaDrawer}
-        onClose={() => setShowFormulaDrawer(false)}
-        grade={grade}
-        board={board}
-        onChangeGrade={handleGradeChange}
-        onChangeBoard={setBoard}
-        onAskTutor={(prompt) => {
-          setActiveSection('tutor');
-          setExternalPromptRequest({ id: Date.now(), text: prompt });
-        }}
+      {showFormulaDrawer && (
+        <Suspense fallback={null}>
+          <InteractiveFormulaReference
+            isOpen={showFormulaDrawer}
+            onClose={() => setShowFormulaDrawer(false)}
+            grade={grade}
+            board={board}
+            onChangeGrade={handleGradeChange}
+            onChangeBoard={setBoard}
+            onAskTutor={(prompt) => {
+              setActiveSection('tutor');
+              setExternalPromptRequest({ id: Date.now(), text: prompt });
+            }}
+          />
+        </Suspense>
+      )}
+
+      {showSimulationsLibrary && (
+        <Suspense fallback={null}>
+          <SimulationsLibraryModal
+            isOpen={showSimulationsLibrary}
+            initialSpec={initialSimulationSpec}
+            grade={grade}
+            onClose={() => setShowSimulationsLibrary(false)}
+            onAskTutor={(prompt) => {
+              setActiveSection('tutor');
+              setExternalPromptRequest({ id: Date.now(), text: prompt });
+            }}
+          />
+        </Suspense>
+      )}
+
+      {/* #83 Floating PiP Mini Formula Bar */}
+      {prefs.pipFormulaVisible && (
+        <aside
+          aria-label="Pinned Quick Formulas"
+          data-testid="pip-formula-bar"
+          className="no-print fixed bottom-20 md:bottom-5 left-3 sm:left-5 z-40 max-w-xs sm:max-w-sm rounded-2xl fluent-glass-panel border px-3.5 py-2.5 text-[11px] space-y-1 shadow-xl"
+        >
+          <div className="flex items-center justify-between gap-2">
+            <span className="font-semibold text-sky-600 dark:text-sky-400">
+              Quick Formulas · Std {grade} {board}
+            </span>
+            <button
+              type="button"
+              onClick={() => setPrefs((p) => ({ ...p, pipFormulaVisible: false }))}
+              aria-label="Close floating formula bar"
+              className="p-0.5 rounded text-slate-400 hover:text-slate-900 dark:hover:text-white"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
+          <div className="font-mono text-slate-700 dark:text-slate-200 space-y-0.5 leading-relaxed">
+            <div>x = (−b ± √(b²−4ac)) / 2a</div>
+            <div>sin²θ + cos²θ = 1 · sec²θ − tan²θ = 1</div>
+            <div>I = P·n(n+1)/24 · r/100 · V_cone = ⅓πr²h</div>
+          </div>
+        </aside>
+      )}
+
+      {showPowerHub && (
+        <Suspense fallback={null}>
+          <PowerHubModal
+            isOpen={showPowerHub}
+            initialTab={powerHubTab}
+            initialFocusKey={powerHubFocusKey}
+            onClose={() => setShowPowerHub(false)}
+            grade={grade}
+            board={board}
+            attempts={attempts}
+            overallAccuracy={masterySummary.overallAccuracy}
+            weakTopics={masterySummary.weakTopics}
+            streakDays={streakDays}
+            adaptiveRating={adaptiveRating}
+            pedagogy={pedagogy}
+            onUpdatePedagogy={(patch) => setPedagogy((prev) => ({ ...prev, ...patch }))}
+            prefs={prefs}
+            onUpdatePrefs={(patch) => setPrefs((prev) => ({ ...prev, ...patch }))}
+            notes={revisionNotes}
+            onUpdateNotes={setRevisionNotes}
+            insights={savedInsights}
+            onDeleteInsight={(id) =>
+              setSavedInsights((prev) => prev.filter((item) => item.id !== id))
+            }
+            escalations={escalatedDoubts}
+            onAddEscalation={(item) => setEscalatedDoubts((prev) => [item, ...prev.slice(0, 29)])}
+            recentActivities={recentActivities}
+            onTrackActivity={handleTrackStudioActivity}
+            activeThreadMessages={tutorMessages}
+            onAskTutor={(prompt) => {
+              setShowPowerHub(false);
+              setActiveSection('tutor');
+              setExternalPromptRequest({ id: Date.now(), text: prompt });
+            }}
+            onSwitchProfile={(profileId) => {
+              const target = prefs.profiles.find((p) => p.id === profileId);
+              if (target) {
+                setPrefs((prev) => ({ ...prev, activeProfileId: profileId }));
+                setGrade(target.grade);
+                setBoard(target.board);
+              }
+            }}
+            onRestoreBackup={(payload) => {
+              setPrefs(payload.prefs);
+              setRevisionNotes(payload.notes);
+              setSavedInsights(payload.insights);
+              setEscalatedDoubts(payload.escalations);
+            }}
+            pomodoroSec={pomodoroSec}
+            pomodoroActive={pomodoroActive}
+            onTogglePomodoro={() => setPomodoroActive((p) => !p)}
+            onResetPomodoro={(minutes) => {
+              setPomodoroActive(false);
+              setPomodoroSec(minutes * 60);
+            }}
+            performanceStatus={performanceStatus}
+          />
+        </Suspense>
+      )}
+
+      <ChatHistoryDrawer
+        isOpen={showChatHistory}
+        threads={chatThreads}
+        activeThreadId={activeThreadId}
+        onClose={() => setShowChatHistory(false)}
+        onSelectThread={handleSelectChatThread}
+        onNewChat={handleStartNewChat}
+        onDeleteThread={handleDeleteChatThread}
+        onRenameThread={handleRenameChatThread}
+        onTogglePinThread={handleTogglePinChatThread}
+        onClearAllThreads={handleClearAllChatThreads}
       />
 
       <OfflineIndicator />

@@ -28,10 +28,17 @@ import {
   buildDefaultLessonPlan,
   buildTutorSystemInstruction,
   classifyGeminiError,
+  computeAdaptiveThinkingBudget,
   getGeminiKeyDiagnostic,
   resolveGeminiModelConfig,
 } from './aiService.ts';
 import { shouldPerformWebSearch } from './webSearch.ts';
+import zlib from 'zlib';
+import {
+  compressBuffer,
+  isCompressiblePath,
+  selectCompressionEncoding,
+} from './compression.ts';
 
 // ---- Security & Validation Tests ----
 
@@ -164,11 +171,11 @@ test('createRateLimiter enforces window limits and prunes expired buckets', () =
 
 // ---- AI Service & Circuit Breaker Tests ----
 
-test('resolveGeminiModelConfig defaults to Gemini 4 Hydrogen with LOW thinking and supports Gemini 4 Neon/Argon', () => {
+test('resolveGeminiModelConfig defaults to Gemini 4 Hydrogen with MEDIUM thinking and supports Gemini 4 Neon/Argon', () => {
   const defaultCfg = resolveGeminiModelConfig(undefined);
   assert.equal(defaultCfg.sdkModelName, 'gemini-4-hydrogen');
   assert.equal(defaultCfg.requiresPaidKey, false);
-  assert.equal(defaultCfg.thinkingLevel, 'LOW');
+  assert.equal(defaultCfg.thinkingLevel, 'MEDIUM');
   assert.equal(resolveGeminiModelConfig('gemini-4-hydrogen').sdkModelName, 'gemini-4-hydrogen');
   assert.equal(resolveGeminiModelConfig('gemini-4-neon').sdkModelName, 'gemini-4-neon');
   assert.equal(resolveGeminiModelConfig('gemini-4-neon').requiresPaidKey, true);
@@ -186,7 +193,55 @@ test('buildTutorSystemInstruction frames AI as Pritesh Sirs Assistant across all
   assert.ok(/Number Systems/i.test(prompt));
   assert.ok(/Algebra/i.test(prompt));
   assert.ok(/Calculus/i.test(prompt));
-  assert.ok(/Do NOT open every message with a canned greeting/i.test(prompt));
+  assert.ok(/Do NOT open every (?:message|reply) with a canned greeting/i.test(prompt));
+
+  const compactPrompt = buildTutorSystemInstruction('9', 'ICSE', null, { compact: true });
+  assert.ok(compactPrompt.length < prompt.length);
+  assert.ok(!compactPrompt.includes('[[SIM:trig'));
+});
+
+test('computeAdaptiveThinkingBudget scales cleanly across Eco, Balanced, and Turbo tiers like Ryzen Precision Boost', () => {
+  const ecoChat = computeAdaptiveThinkingBudget({ question: 'hi there!', requestedModel: 'gemini-4-hydrogen' });
+  assert.equal(ecoChat.tier, 'eco');
+  assert.equal(ecoChat.thinkingLevel, 'LOW');
+  assert.equal(ecoChat.includeThoughts, false);
+  assert.equal(ecoChat.compactSystemPrompt, true);
+  assert.ok(ecoChat.maxOutputTokens <= 700);
+  assert.equal(ecoChat.maxHistoryTurns, 4);
+
+  const ecoFormula = computeAdaptiveThinkingBudget({
+    question: 'formula of area of circle',
+    requestedModel: 'gemini-4-hydrogen',
+  });
+  assert.equal(ecoFormula.tier, 'eco');
+
+  const balanced = computeAdaptiveThinkingBudget({
+    question: 'Solve 2x^2 - 7x + 3 = 0 using quadratic formula',
+    requestedModel: 'gemini-4-hydrogen',
+  });
+  assert.equal(balanced.tier, 'balanced');
+  assert.equal(balanced.thinkingLevel, 'MEDIUM');
+  assert.equal(balanced.includeThoughts, true);
+  assert.equal(balanced.compactSystemPrompt, false);
+  assert.equal(balanced.maxOutputTokens, 2048);
+
+  const turboProof = computeAdaptiveThinkingBudget({
+    question: 'Prove that the angle subtended by an arc at the centre is double the angle at the circumference',
+    requestedModel: 'gemini-4-hydrogen',
+  });
+  assert.equal(turboProof.tier, 'turbo');
+  assert.equal(turboProof.thinkingLevel, 'HIGH');
+  assert.equal(turboProof.includeThoughts, true);
+  assert.equal(turboProof.maxOutputTokens, 4096);
+  assert.equal(turboProof.maxHistoryTurns, 12);
+
+  const turboImage = computeAdaptiveThinkingBudget({
+    question: 'Solve this',
+    hasImage: true,
+    requestedModel: 'gemini-4-hydrogen',
+  });
+  assert.equal(turboImage.tier, 'turbo');
+  assert.equal(turboImage.thinkingLevel, 'HIGH');
 });
 
 test('getGeminiKeyDiagnostic accepts both AQ. auth keys and AIza keys while rejecting placeholders', () => {
@@ -293,6 +348,13 @@ test('analyzeStudentIntent, normalizeTrigExpressionForMathJs, sliceResumedReply,
   assert.equal(intent.summonTool, 'lab');
   assert.equal(intent.labMode, 'mensuration3d');
 
+  const parabolaIntent = analyzeStudentIntent(
+    'Visualize the parabola y = x^2 - 4x + 3 with an interactive simulation',
+    '9',
+    'ICSE'
+  );
+  assert.equal(parabolaIntent.summonTool, null);
+
   assert.equal(normalizeTrigExpressionForMathJs('sin^2(30) + cos(60)'), '(sin(30 deg)^2) + cos(60 deg)');
 
   const full = 'Part 1: Surds are irrational roots. Part 2: Rationalize with conjugates.';
@@ -318,10 +380,27 @@ test('stripDangerousKeys removes prototype pollution keys recursively and saniti
   assert.equal(sanitizeHttpUrl('data:text/html,<script>alert(1)</script>'), null);
 });
 
-test('validateDoubtRequest enforces 3200-char history budget and validateMathVerifyRequest validates expressions', () => {
-  const longHistory = Array.from({ length: 8 }, (_, idx) => ({
+test('validateDoubtRequest preserves full multi-question quiz turns and enforces 14000-char history budget', () => {
+  const fullQuiz =
+    'Trigonometry Quiz:\n1. AB=3, BC=4 find sin A.\n2. Evaluate (sin30+cos60)/tan45.\n3. If sin θ = 5/13 find cos θ.\n4. True or False: sin θ increases from 0 to 90.\n5. Simplify cos^2 θ + sin^2 θ.\n' +
+    'Details '.repeat(140);
+  const quizRes = validateDoubtRequest({
+    question: '1. 4/5 2. 1 3. 12/13 4. True 5. 1',
+    history: [
+      { role: 'user', text: 'Give me a 5-question trig quiz' },
+      { role: 'model', text: fullQuiz },
+    ],
+  });
+  assert.equal(quizRes.ok, true);
+  if (quizRes.ok) {
+    assert.equal(quizRes.data.history.length, 2);
+    assert.ok(quizRes.data.history[1].text.includes('5. Simplify cos^2'));
+    assert.equal(quizRes.data.history[1].text.length, fullQuiz.trim().length);
+  }
+
+  const longHistory = Array.from({ length: 12 }, (_, idx) => ({
     role: idx % 2 === 0 ? 'user' : 'model',
-    text: 'x'.repeat(450),
+    text: 'x'.repeat(2500),
   }));
   const res = validateDoubtRequest({
     question: 'Explain\u0000 surds',
@@ -331,7 +410,7 @@ test('validateDoubtRequest enforces 3200-char history budget and validateMathVer
   if (res.ok) {
     assert.equal(res.data.question, 'Explain surds');
     const totalChars = res.data.history.reduce((s, h) => s + h.text.length, 0);
-    assert.ok(totalChars <= 3200);
+    assert.ok(totalChars <= 14000);
   }
 
   assert.equal(validateMathVerifyRequest({ expression: '' }).ok, false);
@@ -427,5 +506,27 @@ test('buildSmartTutorResponse deterministically solves all 10 new syllabus solve
   const pct = buildSmartTutorResponse('Percentage increase from 80 to 100', '9', 'ICSE', 'Commercial');
   assert.equal(pct.responseType, 'math');
   assert.ok(pct.finalAnswer.includes('25% Increase'));
+});
+
+test('compression helper selects Brotli/Gzip cleanly, filters asset types, and round-trips payloads', () => {
+  assert.equal(selectCompressionEncoding('gzip, deflate, br'), 'br');
+  assert.equal(selectCompressionEncoding('gzip, deflate'), 'gzip');
+  assert.equal(selectCompressionEncoding('br;q=0, gzip;q=0.8'), 'gzip');
+  assert.equal(selectCompressionEncoding('identity'), null);
+  assert.equal(selectCompressionEncoding(undefined), null);
+
+  assert.equal(isCompressiblePath('/assets/index-abc.js'), true);
+  assert.equal(isCompressiblePath('/assets/index-abc.css'), true);
+  assert.equal(isCompressiblePath('/index.html'), true);
+  assert.equal(isCompressiblePath('/pwa-192x192.png'), false);
+  assert.equal(isCompressiblePath('/assets/KaTeX_Main.woff2'), false);
+
+  const samplePayload = Buffer.from('function greet(){return "Pritesh Sir Maths App";}'.repeat(40), 'utf8');
+  const brBuf = compressBuffer(samplePayload, 'br');
+  const gzBuf = compressBuffer(samplePayload, 'gzip');
+  assert.ok(brBuf.length < samplePayload.length / 4);
+  assert.ok(gzBuf.length < samplePayload.length / 4);
+  assert.equal(zlib.brotliDecompressSync(brBuf).toString('utf8'), samplePayload.toString('utf8'));
+  assert.equal(zlib.gunzipSync(gzBuf).toString('utf8'), samplePayload.toString('utf8'));
 });
 

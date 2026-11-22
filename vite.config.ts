@@ -11,6 +11,7 @@ export default defineConfig(() => {
       tailwindcss(),
       VitePWA({
         registerType: 'autoUpdate',
+        injectRegister: 'script-defer',
         includeAssets: ['icon.svg', 'apple-touch-icon.png', 'pwa-192x192.png', 'pwa-512x512.png', 'pwa-maskable-512x512.png'],
         manifest: {
           id: '/',
@@ -44,10 +45,42 @@ export default defineConfig(() => {
           ],
         },
         workbox: {
-          maximumFileSizeToCacheInBytes: 12 * 1024 * 1024,
-          globPatterns: ['**/*.{js,css,html,ico,png,svg,woff,woff2}'],
-          navigateFallbackDenylist: [/^\/api\//, /^\/ws/],
+          skipWaiting: true,
+          clientsClaim: true,
+          cleanupOutdatedCaches: true,
+          maximumFileSizeToCacheInBytes: 4 * 1024 * 1024,
+          globPatterns: ['manifest.webmanifest', 'icon.svg', 'pwa-192x192.png'],
+          navigateFallback: null,
           runtimeCaching: [
+            {
+              urlPattern: ({ request }) => request.mode === 'navigate',
+              handler: 'NetworkFirst',
+              options: {
+                cacheName: 'app-shell-cache',
+                networkTimeoutSeconds: 3,
+                expiration: {
+                  maxEntries: 5,
+                  maxAgeSeconds: 60 * 60 * 24,
+                },
+                cacheableResponse: {
+                  statuses: [200],
+                },
+              },
+            },
+            {
+              urlPattern: /\/assets\/.*\.(?:js|css|woff2?)$/i,
+              handler: 'CacheFirst',
+              options: {
+                cacheName: 'app-assets-cache',
+                expiration: {
+                  maxEntries: 80,
+                  maxAgeSeconds: 60 * 60 * 24 * 30,
+                },
+                cacheableResponse: {
+                  statuses: [200],
+                },
+              },
+            },
             {
               urlPattern: /^https:\/\/fonts\.googleapis\.com\/.*/i,
               handler: 'CacheFirst',
@@ -83,6 +116,26 @@ export default defineConfig(() => {
         },
       }),
     ],
+    build: {
+      target: ['es2020', 'safari14', 'ios14'],
+      rollupOptions: {
+        output: {
+          manualChunks(id) {
+            if (!id.includes('node_modules')) return undefined;
+            if (id.includes('firebase') || id.includes('@firebase')) return 'vendor-firebase';
+            if (id.includes('three')) return 'vendor-three';
+            if (id.includes('recharts') || id.includes('d3-')) return 'vendor-charts';
+            if (id.includes('katex')) return 'vendor-katex';
+            if (id.includes('react-markdown') || id.includes('remark') || id.includes('rehype') || id.includes('unified') || id.includes('micromark') || id.includes('mdast') || id.includes('hast')) {
+              return 'vendor-markdown';
+            }
+            if (id.includes('lucide-react')) return 'vendor-icons';
+            if (id.includes('react-dom') || id.includes('/react/')) return 'vendor-react';
+            return undefined;
+          },
+        },
+      },
+    },
     resolve: {
       alias: {
         '@': path.resolve(__dirname, '.'),

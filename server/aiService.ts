@@ -24,6 +24,7 @@ export type GeminiTutorResult =
   | {
       ok: true;
       text: string;
+      thoughtText?: string;
       displayLabel: string;
       webSources: Array<{ title: string; url: string; snippet: string }>;
     }
@@ -78,11 +79,166 @@ export function resolveGeminiModelConfig(requestedModel?: string): ResolvedGemin
     default:
       return {
         sdkModelName: 'gemini-4-hydrogen',
-        thinkingLevel: ThinkingLevel.LOW,
+        thinkingLevel: ThinkingLevel.MEDIUM,
         displayLabel: 'gemini-4-hydrogen',
         requiresPaidKey: false,
       };
   }
+}
+
+export type AdaptiveComputeTier = 'eco' | 'balanced' | 'turbo';
+
+export interface AdaptiveComputePlan {
+  tier: AdaptiveComputeTier;
+  thinkingLevel?: ThinkingLevel;
+  includeThoughts: boolean;
+  maxOutputTokens: number;
+  maxHistoryTurns: number;
+  maxHistoryCharsPerTurn: number;
+  compactSystemPrompt: boolean;
+  reason: string;
+}
+
+/**
+ * Adaptive "Precision Boost" router: keeps simple greetings & quick formula/arithmetic
+ * lookups lean (Eco), uses crisp balanced reasoning for standard ICSE/CBSE doubts (Balanced),
+ * and unleashes full HIGH thinking + generous output tokens for proofs, calculus, Olympiads,
+ * mistake audits, multi-part problems, and image/sketch analysis (Turbo).
+ */
+export function computeAdaptiveThinkingBudget(params: {
+  question: string;
+  history?: HistoryTurn[];
+  hasImage?: boolean;
+  isResume?: boolean;
+  requestedModel?: string;
+  hasVerifiedMathFact?: boolean;
+}): AdaptiveComputePlan {
+  const baseCfg = resolveGeminiModelConfig(params.requestedModel);
+  const rawQ = (params.question || '').trim();
+  const history = params.history || [];
+
+  // Strip pedagogy tag prefixes like "[Mode: ...]" when measuring raw student prompt complexity
+  const strippedQ = rawQ.replace(/^\[[^\]]+\]\s*/g, '').trim();
+  const lower = strippedQ.toLowerCase();
+
+  // Detect if the student is submitting answers to a prior quiz/worksheet (needs full history)
+  const isQuizOrAnswerGrading =
+    history.length >= 2 &&
+    (/\b(check my|grade|my answers?|did i get|is it right|are these right|option\s+[a-d])\b/i.test(strippedQ) ||
+      /(?:^|\s)(?:1[.)]|q1|a[.)])\s*.+(?:2[.)]|q2|b[.)])/i.test(strippedQ));
+
+  // 1. TURBO BOOST: heavy reasoning, proofs, multi-step calculus/olympiad, images, or Neon model
+  const isHeavyMathReasoning =
+    /\b(prove\s+that|show\s+that|derive|derivation|proof|olympiad|jee|iit|imo|hardest|challenging|tough|tricky|calculus|integral|integrate|differentiate|derivative|differential\s+eq|matrix|matrices|determinant|eigen|vector|complex\s+number|induction|combinatorics|permutation|combination|bayes|conditional\s+probability|conic|parabola|ellipse|hyperbola|locus|circle\s+theorem|trigonometric\s+identity|verify\s+my\s+steps|check\s+(?:my\s+)?rough\s+work|find\s+(?:the\s+)?mistake|spot\s+(?:the\s+)?error|step[\s-]by[\s-]step\s+check|compare\s+both\s+methods|handwriting.*latex|transcribe.*latex)\b/i.test(
+      strippedQ
+    );
+
+  const hasMultiPartStructure =
+    strippedQ.length >= 220 ||
+    (strippedQ.match(/\n/g)?.length ?? 0) >= 3 ||
+    /\(\s*[ivx]+\s*\).*\(\s*[ivx]+\s*\)/i.test(strippedQ) ||
+    /\(\s*a\s*\).*\(\s*b\s*\)/i.test(strippedQ);
+
+  if (
+    params.hasImage ||
+    isHeavyMathReasoning ||
+    hasMultiPartStructure ||
+    baseCfg.sdkModelName === 'gemini-4-neon'
+  ) {
+    const turboThinking =
+      baseCfg.sdkModelName === 'gemini-3.1-flash-lite'
+        ? undefined
+        : baseCfg.sdkModelName === 'gemini-4-argon'
+          ? ThinkingLevel.MEDIUM
+          : ThinkingLevel.HIGH;
+    return {
+      tier: 'turbo',
+      thinkingLevel: turboThinking,
+      includeThoughts: turboThinking !== undefined,
+      maxOutputTokens: 4096,
+      maxHistoryTurns: 12,
+      maxHistoryCharsPerTurn: 2800,
+      compactSystemPrompt: false,
+      reason: params.hasImage
+        ? 'visual_math_reasoning'
+        : isHeavyMathReasoning
+          ? 'deep_proof_or_advanced_math'
+          : hasMultiPartStructure
+            ? 'multi_part_problem'
+            : 'pro_model_requested',
+    };
+  }
+
+  // 2. ECO / IDLE: pure greetings, acknowledgements, identity checks, or short direct lookups
+  const isCasualChitChat =
+    /^(?:hi+|hello+|hey+|yo|sup|good\s+(?:morning|afternoon|evening)|thanks?(?:\s+you)?|ty|thx|ok(?:ay)?|got\s+it|cool|nice|great|awesome|bye|see\s+ya|who\s+are\s+you\??|what\s+can\s+you\s+do\??)(?:\s+(?:there|sir|bro|buddy|friend|ai|assistant))?[\s!.?]*$/i.test(
+      lower
+    );
+
+  const isSimpleDirectLookup =
+    !params.isResume &&
+    !isQuizOrAnswerGrading &&
+    strippedQ.length <= 56 &&
+    !/\b(explain|why|how|solve|factori[sz]e|simplify|graph|plot|visuali[sz]e|simulate|quiz|test|practice|word\s+problem|train|boat|age|mixture|compound\s+interest|theorem)\b/i.test(
+      lower
+    ) &&
+    (Boolean(params.hasVerifiedMathFact) ||
+      /^(?:what\s+is\s+)?(?:the\s+)?(?:formula\s+(?:of|for)|value\s+of|definition\s+of|square\s+of|cube\s+of|sqrt|sin|cos|tan)\b/i.test(
+        lower
+      ) ||
+      /^[\d\s+\-*/^().=%?]+$/.test(strippedQ));
+
+  if (isCasualChitChat || isSimpleDirectLookup) {
+    const ecoThinking =
+      baseCfg.sdkModelName === 'gemini-3.1-flash-lite' ? undefined : ThinkingLevel.LOW;
+    return {
+      tier: 'eco',
+      thinkingLevel: ecoThinking,
+      includeThoughts: false,
+      maxOutputTokens: 640,
+      maxHistoryTurns: 4,
+      maxHistoryCharsPerTurn: 750,
+      compactSystemPrompt: true,
+      reason: isCasualChitChat ? 'casual_greeting_or_ack' : 'quick_direct_lookup',
+    };
+  }
+
+  // 3. BALANCED / CRUISE: standard syllabus doubts, homework, equations, word problems
+  const balancedThinking =
+    baseCfg.sdkModelName === 'gemini-3.1-flash-lite'
+      ? undefined
+      : baseCfg.thinkingLevel ?? ThinkingLevel.MEDIUM;
+
+  return {
+    tier: 'balanced',
+    thinkingLevel: balancedThinking,
+    includeThoughts: balancedThinking !== undefined,
+    maxOutputTokens: params.isResume ? 2400 : 2048,
+    maxHistoryTurns: isQuizOrAnswerGrading ? 12 : 8,
+    maxHistoryCharsPerTurn: isQuizOrAnswerGrading ? 2400 : 1600,
+    compactSystemPrompt: false,
+    reason: isQuizOrAnswerGrading ? 'quiz_grading_context' : 'standard_syllabus_doubt',
+  };
+}
+
+function normalizeHistoryWindow(
+  history: HistoryTurn[],
+  maxTurns: number,
+  maxCharsPerTurn: number
+): Array<{ role: 'user' | 'model'; parts: Array<{ text: string }> }> {
+  const normalized: Array<{ role: 'user' | 'model'; parts: Array<{ text: string }> }> = [];
+  for (const turn of history.slice(-maxTurns)) {
+    const cleanText = turn.text.trim().slice(0, maxCharsPerTurn);
+    if (!cleanText) continue;
+    if (normalized.length === 0 && turn.role !== 'user') continue;
+    const prev = normalized[normalized.length - 1];
+    if (prev && prev.role === turn.role) {
+      prev.parts[0].text = `${prev.parts[0].text}\n\n${cleanText}`.slice(0, maxCharsPerTurn);
+    } else {
+      normalized.push({ role: turn.role, parts: [{ text: cleanText }] });
+    }
+  }
+  return normalized;
 }
 
 export function resolveConfiguredApiKey(): string {
@@ -169,8 +325,8 @@ export class GeminiCircuitBreaker {
     transientCooldownMs?: number;
     authCooldownMs?: number;
   } = {}) {
-    this.transientThreshold = options.transientThreshold ?? 3;
-    this.transientCooldownMs = options.transientCooldownMs ?? 20_000;
+    this.transientThreshold = options.transientThreshold ?? 5;
+    this.transientCooldownMs = options.transientCooldownMs ?? 12_000;
     this.authCooldownMs = options.authCooldownMs ?? 60_000;
   }
 
@@ -328,24 +484,54 @@ export async function executeWithRetry<T>(
 export function buildTutorSystemInstruction(
   grade: GradeLevel,
   board: CurriculumBoard,
-  resumeContext: ResumeContext | null
+  resumeContext: ResumeContext | null,
+  options: { compact?: boolean } = {}
 ): string {
-  const base =
-    `You are Pritesh Sir's AI Maths Assistant — a sharp, encouraging AI study companion built for Standard ${grade} (${board} — ${
-      board === 'ICSE' ? 'Selina Concise' : 'NCERT'
-    }) students. ` +
-    `Never introduce yourself as Pritesh Sir or pretend to be him; if asked who you are, clarify that you are Pritesh Sir's AI Assistant. ` +
-    'You are equally expert across ALL branches of mathematics — Number Systems, Surds & Logarithms, Algebra, Commercial Maths (GST, Banking, Compound Interest), Geometry, Mensuration, Coordinate Geometry, Trigonometry, Statistics & Probability, Matrices, Vectors, and Calculus. Never claim to specialize only in Trigonometry or any single topic. ' +
-    'Write fresh, conversational, tailored answers directly to what the student asked instead of a repetitive readymade textbook sheet. Do NOT open every message with a canned greeting like "Hello! I am..." unless the student greets you first, and do NOT force a boilerplate tip or sign-off onto every reply. ' +
-    'Keep explanations crisp, clear, and complete without filler or mid-sentence cutoffs. Use GitHub Flavored Markdown with LaTeX ($...$ inline and $$...$$ display) for equations, **bold** for key ideas, and tables only when listing a reference table or direct comparison.';
+  const syllabusBook = board === 'ICSE' ? 'Selina Concise' : 'NCERT';
+  const core =
+    `You are Pritesh Sir's AI Maths Assistant — a sharp, warm mentor for Standard ${grade} (${board} — ${syllabusBook}). ` +
+    `Never introduce yourself as Pritesh Sir; if asked, state you are Pritesh Sir's AI Assistant. ` +
+    `You master ALL branches of mathematics (Number Systems, Surds & Logarithms, Algebra, Commercial Maths, Geometry, Mensuration, Coordinate Geometry, Trigonometry, Statistics & Probability, Matrices, Vectors, Calculus). ` +
+    `Match depth to the question: keep casual/quick queries crisp and direct; for math doubts, give the core intuition in one line, then clean step-by-step reasoning using Markdown and LaTeX ($...$ inline, $$...$$ display on own lines) with **bold** highlights. Do NOT open every reply with a canned greeting or boilerplate footer. ` +
+    `Use any internal arithmetic check silently only for accuracy—never mention it. Remember conversation history and grade quiz/follow-up answers against the exact numbered questions asked.`;
+
+  const simDirective = options.compact
+    ? ''
+    : ' INTERACTIVE SIMULATIONS (selective): Only when a diagram truly helps or is requested, end with ONE tag on the last line: ' +
+      '[[SIM:trig angle=30]] | [[SIM:quadratic a=1 b=-4 c=3]] | [[SIM:coordinate x1=-2 y1=-1 x2=4 y2=3]] | [[SIM:circle angle=100 radius=5]] | [[SIM:compound_interest principal=10000 rate=10 years=5]] | [[SIM:calculus preset=x2 x=1]] | [[SIM:progression mode=AP a=3 step=4 n=8]] | [[SIM:mensuration shape=cylinder radius=5 height=10]]. Never emit tags for greetings, tips, or quizzes.';
+
+  const base = `${core}${simDirective}`;
 
   if (resumeContext && resumeContext.partialContent) {
-    return (
-      `${base} ` +
-      'The student is resuming an interrupted explanation. Continue seamlessly from the exact point where the partial explanation stopped without repeating earlier paragraphs.'
-    );
+    return `${base} Resume seamlessly from where the partial explanation stopped without repeating earlier text.`;
   }
   return base;
+}
+
+function extractPartsFromResponse(resp: unknown): { text: string; thoughtText: string } {
+  const parts =
+    (resp as {
+      candidates?: Array<{
+        content?: { parts?: Array<{ text?: string; thought?: boolean }> };
+      }>;
+    })?.candidates?.[0]?.content?.parts || [];
+  let text = '';
+  let thoughtText = '';
+  for (const part of parts) {
+    if (!part || typeof part.text !== 'string' || !part.text) continue;
+    if (part.thought) {
+      thoughtText += part.text;
+    } else {
+      text += part.text;
+    }
+  }
+  if (!text) {
+    const fallbackText = (resp as { text?: string })?.text;
+    if (typeof fallbackText === 'string') {
+      text = fallbackText;
+    }
+  }
+  return { text, thoughtText };
 }
 
 export async function generateGeminiTutorReply(params: {
@@ -358,6 +544,7 @@ export async function generateGeminiTutorReply(params: {
   imageBase64?: string;
   imageMimeType: string;
   resumeContext: ResumeContext | null;
+  verifiedMathReference?: string | null;
 }): Promise<GeminiTutorResult> {
   const { sdkModelName, thinkingLevel, displayLabel, requiresPaidKey } = resolveGeminiModelConfig(
     params.requestedModel
@@ -429,14 +616,24 @@ export async function generateGeminiTutorReply(params: {
     };
   }
 
+  const mathContext = buildMathJsPipelineContext(
+    params.resumeContext?.originalQuestion || params.question
+  );
+
+  const adaptivePlan = computeAdaptiveThinkingBudget({
+    question: params.resumeContext?.originalQuestion || params.question,
+    history: params.history,
+    hasImage: Boolean(params.imageBase64),
+    isResume: Boolean(params.resumeContext?.partialContent),
+    requestedModel: params.requestedModel,
+    hasVerifiedMathFact: Boolean(mathContext.mathJsFact),
+  });
+
   const systemInstruction = buildTutorSystemInstruction(
     params.grade,
     params.board,
-    params.resumeContext
-  );
-
-  const mathContext = buildMathJsPipelineContext(
-    params.resumeContext?.originalQuestion || params.question
+    params.resumeContext,
+    { compact: adaptivePlan.compactSystemPrompt }
   );
 
   const promptBody = params.resumeContext?.partialContent
@@ -451,6 +648,9 @@ export async function generateGeminiTutorReply(params: {
         `<student_query grade="${params.grade}" board="${params.board}">`,
         params.question,
         mathContext.mathJsFact ? `[Verified Calculation: ${mathContext.mathJsFact}]` : '',
+        params.verifiedMathReference
+          ? `[Verified Symbolic Check (do not copy verbatim, explain naturally in your own voice): ${params.verifiedMathReference}]`
+          : '',
         `</student_query>`,
       ]
         .filter(Boolean)
@@ -491,18 +691,36 @@ export async function generateGeminiTutorReply(params: {
   const executeGeminiCall = async (
     useSearchTool: boolean,
     modelOverride?: { sdkModelName: ResolvedGeminiModel['sdkModelName']; thinkingLevel?: ThinkingLevel },
-    timeoutMs = 6_500
+    timeoutMs = 15_000
   ) => {
     const activeModel = modelOverride ? modelOverride.sdkModelName : sdkModelName;
-    const activeThinking = modelOverride ? modelOverride.thinkingLevel : thinkingLevel;
+    const activeThinking = modelOverride
+      ? modelOverride.thinkingLevel
+      : adaptivePlan.thinkingLevel ?? thinkingLevel;
+    const includeThoughts = modelOverride ? activeThinking !== undefined : adaptivePlan.includeThoughts;
     const callConfig = {
       systemInstruction,
-      maxOutputTokens: 1200,
+      maxOutputTokens: adaptivePlan.maxOutputTokens,
       ...(useSearchTool ? { tools: [{ googleSearch: {} }] } : {}),
-      ...(activeThinking ? { thinkingConfig: { thinkingLevel: activeThinking } } : {}),
+      ...(activeThinking
+        ? { thinkingConfig: { thinkingLevel: activeThinking, includeThoughts } }
+        : {}),
     };
 
+    const normalizedHistory = normalizeHistoryWindow(
+      params.history,
+      adaptivePlan.maxHistoryTurns,
+      adaptivePlan.maxHistoryCharsPerTurn
+    );
+
     if (params.imageBase64) {
+      const recentContextText =
+        normalizedHistory.length > 0
+          ? `Recent conversation context:\n${normalizedHistory
+              .slice(-4)
+              .map((h) => `${h.role === 'user' ? 'Student' : 'Assistant'}: ${h.parts[0].text.slice(0, 800)}`)
+              .join('\n')}\n\nCurrent question about the attached image:\n`
+          : '';
       const resp = await withTimeout(
         ai.models.generateContent({
           model: activeModel,
@@ -514,28 +732,50 @@ export async function generateGeminiTutorReply(params: {
                   data: params.imageBase64,
                 },
               },
-              { text: promptBody },
+              { text: `${recentContextText}${promptBody}` },
             ],
           },
           config: callConfig,
         }),
-        Math.max(timeoutMs, 15_000)
+        Math.max(timeoutMs, 18_000)
       );
-      return { text: (resp.text ?? '').trim(), webSources: extractGroundingSources(resp) };
+      const extracted = extractPartsFromResponse(resp);
+      return {
+        text: extracted.text.trim(),
+        thoughtText: extracted.thoughtText.trim(),
+        webSources: extractGroundingSources(resp),
+      };
     }
 
-    const formattedHistory = params.history.slice(-6).map((turn) => ({
-      role: turn.role,
-      parts: [{ text: turn.text.slice(0, 350) }],
-    }));
+    if (normalizedHistory.length === 0) {
+      const resp = await withTimeout(
+        ai.models.generateContent({
+          model: activeModel,
+          contents: promptBody,
+          config: callConfig,
+        }),
+        timeoutMs
+      );
+      const extracted = extractPartsFromResponse(resp);
+      return {
+        text: extracted.text.trim(),
+        thoughtText: extracted.thoughtText.trim(),
+        webSources: extractGroundingSources(resp),
+      };
+    }
 
     const chat = ai.chats.create({
       model: activeModel,
-      history: formattedHistory,
+      history: normalizedHistory,
       config: callConfig,
     });
     const resp = await withTimeout(chat.sendMessage({ message: promptBody }), timeoutMs);
-    return { text: (resp.text ?? '').trim(), webSources: extractGroundingSources(resp) };
+    const extracted = extractPartsFromResponse(resp);
+    return {
+      text: extracted.text.trim(),
+      thoughtText: extracted.thoughtText.trim(),
+      webSources: extractGroundingSources(resp),
+    };
   };
 
   try {
@@ -551,9 +791,9 @@ export async function generateGeminiTutorReply(params: {
 
     let resolvedLabel = skipDirectlyToFastModel ? 'gemini-3.1-flash-lite' : displayLabel;
 
-    const runPrimary = async () => {
+    const runPrimary = async (timeoutMs = 15_000) => {
       try {
-        const primaryRes = await executeGeminiCall(canTrySearchTool, undefined, 10_000);
+        const primaryRes = await executeGeminiCall(canTrySearchTool, undefined, timeoutMs);
         return { ...primaryRes, usedModel: displayLabel };
       } catch (err) {
         const kind = classifyGeminiError(err);
@@ -568,125 +808,149 @@ export async function generateGeminiTutorReply(params: {
           if (kind === 'quota') {
             searchGroundingCooldownUntil = Date.now() + 5 * 60_000;
           }
-          const noSearchRes = await executeGeminiCall(false, undefined, 10_000);
+          const noSearchRes = await executeGeminiCall(false, undefined, timeoutMs);
           return { ...noSearchRes, usedModel: displayLabel };
         }
         throw err;
       }
     };
 
-    const runFastLite = async () => {
+    const runFastLite = async (timeoutMs = 11_000) => {
       const fastRes = await executeGeminiCall(
         false,
         { sdkModelName: 'gemini-3.1-flash-lite' },
-        11_000
+        timeoutMs
       );
       return { ...fastRes, usedModel: 'gemini-3.1-flash-lite' };
     };
 
-    let result: {
-      text: string;
-      webSources: Array<{ title: string; url: string; snippet: string }>;
-      usedModel: string;
-    };
-
-    if (skipDirectlyToFastModel) {
-      result = await runFastLite();
-      geminiCircuitBreaker.recordSuccess();
-      resolvedLabel = result.usedModel;
-    } else if (sdkModelName === 'gemini-4-hydrogen' && !params.imageBase64) {
-      // Hedged request: give Gemini 4 Hydrogen a 4.5s head start; if it hasn't replied yet
-      // (or fails transiently), launch gemini-3.1-flash-lite in parallel and return whichever
-      // finishes first cleanly so students never wait 15-20s.
-      result = await new Promise((resolve, reject) => {
+    // Runs a list of staggered model attempts in parallel and resolves with the first clean reply,
+    // preventing silent upstream socket stalls from hanging for 20+ seconds and returning 503.
+    const raceStaggeredAttempts = (
+      attempts: Array<{
+        delayMs: number;
+        fromHedge: boolean;
+        run: () => Promise<{
+          text: string;
+          thoughtText: string;
+          webSources: Array<{ title: string; url: string; snippet: string }>;
+          usedModel: string;
+        }>;
+      }>
+    ) =>
+      new Promise<{
+        text: string;
+        thoughtText: string;
+        webSources: Array<{ title: string; url: string; snippet: string }>;
+        usedModel: string;
+      }>((resolve, reject) => {
         let settled = false;
-        let hedgeLaunched = false;
-        let primaryErr: unknown = null;
-        let hedgeErr: unknown = null;
-        let pendingCount = 1;
+        let launched = 0;
+        let completed = 0;
+        let lastErr: unknown = null;
+        const timers: ReturnType<typeof setTimeout>[] = [];
 
-        const finishSuccess = (
-          res: {
-            text: string;
-            webSources: Array<{ title: string; url: string; snippet: string }>;
-            usedModel: string;
-          },
-          fromHedge: boolean
-        ) => {
-          if (settled) return;
-          settled = true;
-          clearTimeout(hedgeTimer);
-          if (fromHedge) {
-            primaryModelHighDemandUntil = Date.now() + 5 * 60_000;
-          }
-          geminiCircuitBreaker.recordSuccess();
-          resolvedLabel = res.usedModel;
-          resolve(res);
+        const clearAllTimers = () => {
+          for (const t of timers) clearTimeout(t);
         };
 
-        const launchHedge = () => {
-          if (settled || hedgeLaunched) return;
-          hedgeLaunched = true;
-          pendingCount += 1;
-          runFastLite()
-            .then((res) => finishSuccess(res, true))
+        const launchAt = (idx: number) => {
+          if (settled || idx >= attempts.length) return;
+          const attempt = attempts[idx];
+          launched += 1;
+          attempt
+            .run()
+            .then((res) => {
+              if (settled) return;
+              settled = true;
+              clearAllTimers();
+              if (attempt.fromHedge) {
+                primaryModelHighDemandUntil = Date.now() + 5 * 60_000;
+              } else {
+                primaryModelHighDemandUntil = 0;
+              }
+              geminiCircuitBreaker.recordSuccess();
+              resolvedLabel = res.usedModel;
+              resolve(res);
+            })
             .catch((err) => {
-              hedgeErr = err;
-              pendingCount -= 1;
-              if (!settled && pendingCount === 0) {
+              lastErr = err;
+              completed += 1;
+              const kind = classifyGeminiError(err);
+              // Abort immediately on non-retryable auth/billing/disabled errors
+              if (
+                !settled &&
+                (kind === 'auth' || kind === 'service_disabled' || kind === 'billing_required')
+              ) {
                 settled = true;
-                clearTimeout(hedgeTimer);
-                const finalErr = primaryErr ?? hedgeErr;
+                clearAllTimers();
                 geminiCircuitBreaker.recordFailure(
-                  classifyGeminiError(finalErr),
+                  kind,
                   Date.now(),
-                  String((finalErr as { message?: string })?.message ?? finalErr ?? '')
+                  String((err as { message?: string })?.message ?? err ?? '')
                 );
-                reject(finalErr);
+                reject(err);
+                return;
+              }
+              // If the first attempt failed transiently, immediately kick off the next unlaunched fallback
+              if (!settled && launched < attempts.length) {
+                const nextIdx = launched;
+                if (timers[nextIdx]) clearTimeout(timers[nextIdx]);
+                launchAt(nextIdx);
+                return;
+              }
+              if (!settled && completed >= attempts.length) {
+                settled = true;
+                clearAllTimers();
+                geminiCircuitBreaker.recordFailure(
+                  classifyGeminiError(lastErr),
+                  Date.now(),
+                  String((lastErr as { message?: string })?.message ?? lastErr ?? '')
+                );
+                reject(lastErr);
               }
             });
         };
 
-        const hedgeTimer = setTimeout(launchHedge, 4_500);
+        attempts.forEach((attempt, idx) => {
+          if (attempt.delayMs <= 0) {
+            launchAt(idx);
+          } else {
+            timers[idx] = setTimeout(() => {
+              if (!settled && launched <= idx) {
+                launchAt(idx);
+              }
+            }, attempt.delayMs);
+          }
+        });
+      });
 
-        runPrimary()
-          .then((res) => finishSuccess(res, false))
-          .catch((err) => {
-            primaryErr = err;
-            pendingCount -= 1;
-            const kind = classifyGeminiError(err);
-            if (kind === 'transient') {
-              clearTimeout(hedgeTimer);
-              launchHedge();
-              return;
-            }
-            if (!settled && pendingCount === 0) {
-              settled = true;
-              clearTimeout(hedgeTimer);
-              geminiCircuitBreaker.recordFailure(
-                kind,
-                Date.now(),
-                String((err as { message?: string })?.message ?? err ?? '')
-              );
-              reject(err);
-            }
-          });
-      });
+    let result: {
+      text: string;
+      thoughtText: string;
+      webSources: Array<{ title: string; url: string; snippet: string }>;
+      usedModel: string;
+    };
+
+    if (skipDirectlyToFastModel || sdkModelName === 'gemini-3.1-flash-lite') {
+      // Fast-lite primary with 5.5s fresh-socket retry hedge + 10s primary fallback
+      result = await raceStaggeredAttempts([
+        { delayMs: 0, fromHedge: skipDirectlyToFastModel, run: () => runFastLite(10_000) },
+        { delayMs: 5_500, fromHedge: skipDirectlyToFastModel, run: () => runFastLite(12_000) },
+        { delayMs: 10_000, fromHedge: false, run: () => runPrimary(18_000) },
+      ]);
+    } else if (sdkModelName === 'gemini-4-hydrogen' && !params.imageBase64) {
+      // Gemini 4 Hydrogen primary (with MEDIUM thinking) + 6.5s flash-lite hedge + 11.5s retry hedge
+      result = await raceStaggeredAttempts([
+        { delayMs: 0, fromHedge: false, run: () => runPrimary(18_000) },
+        { delayMs: 6_500, fromHedge: true, run: () => runFastLite(11_000) },
+        { delayMs: 11_500, fromHedge: true, run: () => runFastLite(12_000) },
+      ]);
     } else {
-      result = await runPrimary().catch(async (primaryErr) => {
-        const kind = classifyGeminiError(primaryErr);
-        const errMsg = String((primaryErr as { message?: string })?.message ?? primaryErr ?? '');
-        if (kind === 'transient' && sdkModelName !== 'gemini-3.1-flash-lite') {
-          const failover = await runFastLite();
-          geminiCircuitBreaker.recordSuccess();
-          resolvedLabel = failover.usedModel;
-          return failover;
-        }
-        geminiCircuitBreaker.recordFailure(kind, Date.now(), errMsg);
-        throw primaryErr;
-      });
-      geminiCircuitBreaker.recordSuccess();
-      resolvedLabel = result.usedModel;
+      result = await raceStaggeredAttempts([
+        { delayMs: 0, fromHedge: false, run: () => runPrimary(24_000) },
+        { delayMs: 12_000, fromHedge: true, run: () => runFastLite(14_000) },
+      ]);
     }
 
     if (!result.text) {
@@ -701,7 +965,13 @@ export async function generateGeminiTutorReply(params: {
       };
     }
 
-    return { ok: true, text: result.text, displayLabel: resolvedLabel, webSources: result.webSources };
+    return {
+      ok: true,
+      text: result.text,
+      thoughtText: result.thoughtText,
+      displayLabel: resolvedLabel,
+      webSources: result.webSources,
+    };
   } catch (err) {
     const kind = classifyGeminiError(err);
     if (kind === 'billing_required') {
@@ -782,6 +1052,425 @@ export async function generateGeminiTutorReply(params: {
       code: 'GEMINI_REQUEST_FAILED',
       userMessage: `Gemini (${displayLabel}) could not process this request. Try switching to gemini-4-hydrogen or rephrasing your question.`,
       retryable: false,
+      displayLabel,
+    };
+  }
+}
+
+/**
+ * Streams real-time Gemini reasoning thoughts (`includeThoughts: true`) and answer tokens
+ * via `generateContentStream` / `chat.sendMessageStream` for a live, ChatGPT-like experience.
+ * Automatically fails over to `gemini-3.1-flash-lite` if the primary stream fails before emitting output.
+ */
+export async function streamGeminiTutorReply(
+  params: {
+    question: string;
+    grade: GradeLevel;
+    board: CurriculumBoard;
+    requestedModel: string;
+    history: HistoryTurn[];
+    enableWebSearch: boolean;
+    imageBase64?: string;
+    imageMimeType: string;
+    resumeContext: ResumeContext | null;
+    verifiedMathReference?: string | null;
+    signal?: AbortSignal;
+  },
+  callbacks: {
+    onThought?: (delta: string) => void;
+    onToken?: (delta: string) => void;
+  }
+): Promise<GeminiTutorResult> {
+  const { sdkModelName, thinkingLevel, displayLabel, requiresPaidKey } = resolveGeminiModelConfig(
+    params.requestedModel
+  );
+
+  if (getGeminiKeyDiagnostic() === 'missing') {
+    return {
+      ok: false,
+      errorKind: 'missing_key',
+      status: 401,
+      code: 'GEMINI_KEY_MISSING',
+      userMessage:
+        'No Gemini API key is configured. Open Settings > Secrets in AI Studio and set GEMINI_API_KEY.',
+      retryable: false,
+      displayLabel,
+    };
+  }
+
+  const ai = getGenAIClient();
+  if (!ai) {
+    const breakerState = geminiCircuitBreaker.getState();
+    return {
+      ok: false,
+      errorKind: 'transient',
+      status: 503,
+      code: 'GEMINI_CIRCUIT_OPEN',
+      userMessage: `Gemini (${displayLabel}) is cooling down after temporary errors. Please retry in ${Math.max(1, Math.ceil(breakerState.retryInMs / 1000))} seconds.`,
+      retryable: true,
+      displayLabel,
+    };
+  }
+
+  const mathContext = buildMathJsPipelineContext(
+    params.resumeContext?.originalQuestion || params.question
+  );
+
+  const adaptivePlan = computeAdaptiveThinkingBudget({
+    question: params.resumeContext?.originalQuestion || params.question,
+    history: params.history,
+    hasImage: Boolean(params.imageBase64),
+    isResume: Boolean(params.resumeContext?.partialContent),
+    requestedModel: params.requestedModel,
+    hasVerifiedMathFact: Boolean(mathContext.mathJsFact),
+  });
+
+  const systemInstruction = buildTutorSystemInstruction(
+    params.grade,
+    params.board,
+    params.resumeContext,
+    { compact: adaptivePlan.compactSystemPrompt }
+  );
+
+  const promptBody = params.resumeContext?.partialContent
+    ? [
+        `<student_query grade="${params.grade}" board="${params.board}">`,
+        `Original question: ${params.resumeContext.originalQuestion}`,
+        `Already delivered partial explanation (continue directly from the end without repeating):`,
+        params.resumeContext.partialContent,
+        `</student_query>`,
+      ].join('\n')
+    : [
+        `<student_query grade="${params.grade}" board="${params.board}">`,
+        params.question,
+        mathContext.mathJsFact ? `[Internal arithmetic verification — do not mention: ${mathContext.mathJsFact}]` : '',
+        params.verifiedMathReference
+          ? `[Internal arithmetic verification — do not mention in thoughts or reply: ${params.verifiedMathReference}]`
+          : '',
+        `</student_query>`,
+      ]
+        .filter(Boolean)
+        .join('\n');
+
+  const normalizedHistory = normalizeHistoryWindow(
+    params.history,
+    adaptivePlan.maxHistoryTurns,
+    adaptivePlan.maxHistoryCharsPerTurn
+  );
+
+  const canTrySearchTool = shouldAttachGoogleSearchTool(params.question, params.enableWebSearch);
+  const effectiveThinking = adaptivePlan.thinkingLevel ?? thinkingLevel;
+
+  const runStreamAttempt = async (
+    activeModel: ResolvedGeminiModel['sdkModelName'],
+    activeThinking: ThinkingLevel | undefined,
+    useSearchTool: boolean
+  ): Promise<{
+    text: string;
+    thoughtText: string;
+    webSources: Array<{ title: string; url: string; snippet: string }>;
+    usedModel: string;
+  }> => {
+    const callConfig = {
+      systemInstruction,
+      maxOutputTokens: adaptivePlan.maxOutputTokens,
+      ...(useSearchTool ? { tools: [{ googleSearch: {} }] } : {}),
+      ...(activeThinking
+        ? {
+            thinkingConfig: {
+              thinkingLevel: activeThinking,
+              includeThoughts: adaptivePlan.includeThoughts,
+            },
+          }
+        : {}),
+    };
+
+    const handshakeTimeoutMs =
+      activeModel === 'gemini-4-hydrogen' && !params.imageBase64
+        ? adaptivePlan.tier === 'turbo'
+          ? 12_000
+          : 7_500
+        : 12_000;
+
+    let streamIter: AsyncIterable<unknown>;
+    if (params.imageBase64) {
+      const recentContextText =
+        normalizedHistory.length > 0
+          ? `Recent conversation context:\n${normalizedHistory
+              .slice(-4)
+              .map((h) => `${h.role === 'user' ? 'Student' : 'Assistant'}: ${h.parts[0].text.slice(0, 800)}`)
+              .join('\n')}\n\nCurrent question about the attached image:\n`
+          : '';
+      streamIter = await withTimeout(
+        ai.models.generateContentStream({
+          model: activeModel,
+          contents: {
+            parts: [
+              {
+                inlineData: {
+                  mimeType: params.imageMimeType,
+                  data: params.imageBase64,
+                },
+              },
+              { text: `${recentContextText}${promptBody}` },
+            ],
+          },
+          config: callConfig,
+        }),
+        18_000
+      );
+    } else if (normalizedHistory.length === 0) {
+      streamIter = await withTimeout(
+        ai.models.generateContentStream({
+          model: activeModel,
+          contents: promptBody,
+          config: callConfig,
+        }),
+        handshakeTimeoutMs
+      );
+    } else {
+      const chat = ai.chats.create({
+        model: activeModel,
+        history: normalizedHistory,
+        config: callConfig,
+      });
+      streamIter = await withTimeout(chat.sendMessageStream({ message: promptBody }), handshakeTimeoutMs);
+    }
+
+    let fullText = '';
+    let fullThought = '';
+    const webSourcesMap = new Map<string, { title: string; url: string; snippet: string }>();
+
+    for await (const chunk of streamIter) {
+      if (params.signal?.aborted) {
+        break;
+      }
+      const c = chunk as {
+        text?: string;
+        candidates?: Array<{
+          content?: { parts?: Array<{ text?: string; thought?: boolean }> };
+          groundingMetadata?: {
+            groundingChunks?: Array<{ web?: { uri?: string; title?: string } }>;
+          };
+        }>;
+      };
+
+      const parts = c.candidates?.[0]?.content?.parts;
+      if (Array.isArray(parts) && parts.length > 0) {
+        for (const part of parts) {
+          if (!part || typeof part.text !== 'string' || !part.text) continue;
+          if (part.thought) {
+            fullThought += part.text;
+            callbacks.onThought?.(part.text);
+          } else {
+            fullText += part.text;
+            callbacks.onToken?.(part.text);
+          }
+        }
+      } else if (typeof c.text === 'string' && c.text) {
+        fullText += c.text;
+        callbacks.onToken?.(c.text);
+      }
+
+      const groundingChunks = c.candidates?.[0]?.groundingMetadata?.groundingChunks || [];
+      for (const ch of groundingChunks) {
+        const uri = ch?.web?.uri;
+        if (!uri || webSourcesMap.has(uri)) continue;
+        if (!uri.startsWith('https://') && !uri.startsWith('http://')) continue;
+        if (webSourcesMap.size >= 4) break;
+        webSourcesMap.set(uri, {
+          title: (ch.web?.title || 'Verified Web Reference').slice(0, 140),
+          url: uri,
+          snippet: 'Verified source retrieved via Google Search grounding.',
+        });
+      }
+    }
+
+    return {
+      text: fullText.trim(),
+      thoughtText: fullThought.trim(),
+      webSources: Array.from(webSourcesMap.values()),
+      usedModel: activeModel,
+    };
+  };
+
+  let emittedAny = false;
+  const originalOnThought = callbacks.onThought;
+  const originalOnToken = callbacks.onToken;
+  callbacks.onThought = (d: string) => {
+    emittedAny = true;
+    originalOnThought?.(d);
+  };
+  callbacks.onToken = (d: string) => {
+    emittedAny = true;
+    originalOnToken?.(d);
+  };
+
+  try {
+    let streamed: {
+      text: string;
+      thoughtText: string;
+      webSources: Array<{ title: string; url: string; snippet: string }>;
+      usedModel: string;
+    };
+
+    const skipCongestedPrimary =
+      sdkModelName === 'gemini-4-hydrogen' &&
+      !params.imageBase64 &&
+      Date.now() < primaryModelHighDemandUntil;
+
+    const fallbackThinking = effectiveThinking ?? ThinkingLevel.MEDIUM;
+
+    try {
+      if (skipCongestedPrimary) {
+        streamed = await runStreamAttempt('gemini-3.1-flash-lite', fallbackThinking, false);
+        geminiCircuitBreaker.recordSuccess();
+      } else {
+        streamed = await runStreamAttempt(sdkModelName, effectiveThinking, canTrySearchTool);
+        primaryModelHighDemandUntil = 0;
+        geminiCircuitBreaker.recordSuccess();
+      }
+    } catch (primaryErr) {
+      const kind = classifyGeminiError(primaryErr);
+      console.warn(
+        `[streamGeminiTutorReply] Primary model ${sdkModelName} failed (${kind}):`,
+        String((primaryErr as { message?: string })?.message ?? primaryErr ?? '').slice(0, 220)
+      );
+      if (
+        params.signal?.aborted ||
+        emittedAny ||
+        kind === 'auth' ||
+        kind === 'service_disabled' ||
+        kind === 'billing_required'
+      ) {
+        throw primaryErr;
+      }
+
+      if (sdkModelName === 'gemini-4-hydrogen' && (kind === 'transient' || kind === 'quota')) {
+        primaryModelHighDemandUntil = Date.now() + 3 * 60_000;
+      }
+
+      // Retry without googleSearch grounding first if grounding caused failure
+      if (canTrySearchTool && !skipCongestedPrimary) {
+        if (kind === 'quota') {
+          searchGroundingCooldownUntil = Date.now() + 5 * 60_000;
+        }
+        try {
+          streamed = await runStreamAttempt(sdkModelName, effectiveThinking, false);
+          geminiCircuitBreaker.recordSuccess();
+        } catch {
+          try {
+            streamed = await runStreamAttempt('gemini-3.1-flash-lite', fallbackThinking, false);
+            geminiCircuitBreaker.recordSuccess();
+          } catch {
+            streamed = await runStreamAttempt('gemini-3.1-flash-lite', undefined, false);
+            geminiCircuitBreaker.recordSuccess();
+          }
+        }
+      } else if (sdkModelName !== 'gemini-3.1-flash-lite' && !skipCongestedPrimary) {
+        // Keep real Gemini thinking + thought summaries active on flash-lite failover
+        try {
+          streamed = await runStreamAttempt('gemini-3.1-flash-lite', fallbackThinking, false);
+          geminiCircuitBreaker.recordSuccess();
+        } catch {
+          streamed = await runStreamAttempt('gemini-3.1-flash-lite', undefined, false);
+          geminiCircuitBreaker.recordSuccess();
+        }
+      } else if (thinkingLevel || skipCongestedPrimary) {
+        streamed = await runStreamAttempt('gemini-3.1-flash-lite', undefined, false);
+        geminiCircuitBreaker.recordSuccess();
+      } else {
+        throw primaryErr;
+      }
+    }
+
+    callbacks.onThought = originalOnThought;
+    callbacks.onToken = originalOnToken;
+
+    if (!streamed.text && !params.signal?.aborted) {
+      return {
+        ok: false,
+        errorKind: 'transient',
+        status: 502,
+        code: 'GEMINI_EMPTY_RESPONSE',
+        userMessage: `Gemini (${streamed.usedModel}) returned an empty response. Please try asking again.`,
+        retryable: true,
+        displayLabel: streamed.usedModel,
+      };
+    }
+
+    return {
+      ok: true,
+      text: streamed.text,
+      thoughtText: streamed.thoughtText,
+      displayLabel: streamed.usedModel,
+      webSources: streamed.webSources,
+    };
+  } catch (err) {
+    callbacks.onThought = originalOnThought;
+    callbacks.onToken = originalOnToken;
+    const kind = classifyGeminiError(err);
+    geminiCircuitBreaker.recordFailure(
+      kind,
+      Date.now(),
+      String((err as { message?: string })?.message ?? err ?? '')
+    );
+
+    if (kind === 'billing_required') {
+      return {
+        ok: false,
+        errorKind: 'billing_required',
+        status: 403,
+        code: 'BILLING_REQUIRED',
+        userMessage: `This model (${displayLabel}) or project requires billing to be enabled. Switch to gemini-4-hydrogen (free tier) or enable billing on your project.`,
+        retryable: false,
+        displayLabel,
+      };
+    }
+    if (kind === 'service_disabled') {
+      return {
+        ok: false,
+        errorKind: 'service_disabled',
+        status: 403,
+        code: 'API_NOT_ENABLED',
+        userMessage:
+          'The Generative Language API is not enabled in your Google Cloud project yet. Enable Generative Language API in Google Cloud Console, wait ~1 minute, and retry.',
+        retryable: false,
+        displayLabel,
+      };
+    }
+    if (kind === 'auth') {
+      return {
+        ok: false,
+        errorKind: 'auth',
+        status: 401,
+        code: 'API_KEY_INVALID',
+        userMessage:
+          'Your Gemini API key was rejected (API_KEY_INVALID / PERMISSION_DENIED). Please open Settings > Secrets in AI Studio and check or replace GEMINI_API_KEY.',
+        retryable: false,
+        displayLabel,
+      };
+    }
+    if (kind === 'quota') {
+      return {
+        ok: false,
+        errorKind: 'quota',
+        status: 429,
+        code: 'GEMINI_QUOTA_EXCEEDED',
+        userMessage: requiresPaidKey
+          ? `${displayLabel} requires a billing-enabled API key or exceeded its quota (429). Switch to gemini-4-hydrogen (free tier).`
+          : 'Gemini API rate limit reached (429). Please wait a few seconds and retry.',
+        retryable: !requiresPaidKey,
+        displayLabel,
+      };
+    }
+    return {
+      ok: false,
+      errorKind: kind === 'transient' ? 'transient' : 'fatal',
+      status: kind === 'transient' ? 503 : 502,
+      code: kind === 'transient' ? 'GEMINI_UNAVAILABLE' : 'GEMINI_REQUEST_FAILED',
+      userMessage: `Gemini (${displayLabel}) is temporarily unavailable. Please tap Retry in a moment.`,
+      retryable: true,
       displayLabel,
     };
   }

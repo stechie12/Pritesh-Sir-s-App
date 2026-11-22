@@ -1,4 +1,5 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { MathScratchpad } from './MathScratchpad';
 import {
   Mic,
   MicOff,
@@ -39,6 +40,7 @@ import {
   Download,
   Search,
   Type,
+  Sliders,
 } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -48,16 +50,26 @@ import katex from 'katex';
 import 'katex/dist/katex.min.css';
 import { GradeLevel, CurriculumBoard } from '../utils/adaptiveEngine';
 import {
-  getCachedTutorResponse,
-  setCachedTutorResponse,
   copyTextSafely,
   sanitizeCitationUrl,
   formatMathForNaturalSpeech,
   compressImageFileToBase64,
   classifyMessageChapter,
-  InteractiveTrigVisualizer,
-  InteractiveQuadraticPlotter,
 } from '../utils/tutorEnhancements';
+import {
+  parseSseChunkBuffer,
+  stripPartialSimDirective,
+} from '../utils/streamTutor';
+import {
+  buildThinkingStageLabel,
+  computeNextRevealedLength,
+} from '../utils/typewriterBuffer';
+import { InlineMathVisualizer } from '../utils/mathVisualizers';
+import {
+  type InlineVisualizerSpec,
+  parseAiVisualizerDirective,
+  sanitizeVisualizerSpec,
+} from '../utils/visualizerDetector';
 import {
   executeWithExponentialBackoff,
   RetryableHttpError,
@@ -74,7 +86,17 @@ import {
 import {
   buildTutorMarkdownExport,
   normalizeLatexDelimiters,
+  wrapStandaloneLatexEnvironments,
 } from '../utils/practiceWorkspace';
+import {
+  buildPedagogyPromptPrefix,
+  detectCommonMathTraps,
+  generateTwinProblem,
+  type TutorPedagogyConfig,
+} from '../utils/tutorPedagogy';
+import type { SavedInsightItem, WorkspacePreferences } from '../utils/workspacePreferences';
+import type { PowerHubTab } from '../data/featureSuiteCatalog';
+import { getPerformanceCadence } from '../utils/performanceMode';
 
 export type SummonableTool = 'lab' | 'practice' | 'planner' | 'dashboard';
 
@@ -91,11 +113,14 @@ export interface TutorMessage {
   examTip: string;
   timestamp: string;
   latencySec?: string;
+  thoughtDurationSec?: string;
   modelUsed?: string;
+  thoughtText?: string;
   thinkingTrace?: string[];
   webSources?: Array<{ title: string; url: string; snippet: string }>;
   savedToCloud?: boolean;
   summonedTool?: SummonableTool | null;
+  visualizerSpec?: InlineVisualizerSpec | null;
   detectedContextText?: string;
   isInterrupted?: boolean;
   interruptedReason?: string;
@@ -114,7 +139,14 @@ interface DoubtTutorPanelProps {
   onSummonTool: (tool: SummonableTool, switchImmediately?: boolean) => void;
   onDetectCurriculum: (grade: GradeLevel, board: CurriculumBoard) => void;
   onOpenFormulaReference?: () => void;
+  onOpenSimulationsLibrary?: (initialSpec?: InlineVisualizerSpec | null) => void;
   externalPromptRequest?: { id: number; text: string } | null;
+  pedagogy?: TutorPedagogyConfig;
+  prefs?: WorkspacePreferences;
+  onSaveInsight?: (item: SavedInsightItem) => void;
+  onSendToNotes?: (title: string, chapter: string, body: string) => void;
+  onOpenPowerStudio?: (tab?: PowerHubTab, focusKey?: string) => void;
+  performanceModeActive?: boolean;
 }
 
 const REAL_GEMINI_MODELS = [
@@ -308,44 +340,6 @@ const TOOL_LABELS: Record<SummonableTool, { title: string; subtitle: string }> =
   },
 };
 
-// Generate real-time contextual thinking lines showing what the AI is actually doing for the user's specific prompt
-function buildLiveThinkingSteps(
-  question: string,
-  grade: GradeLevel,
-  board: CurriculumBoard
-): string[] {
-  const qTrim = question.trim();
-  const qLower = qTrim.toLowerCase();
-  const shortQ = qTrim.length > 55 ? `${qTrim.slice(0, 55)}...` : qTrim;
-
-  const steps: string[] = [`Reading prompt: "${shortQ}"`];
-
-  if (/\b(sin|cos|tan|cot|sec|cosec|csc|sine|cosine|tangent|cotangent|trigonometry|tirgnometry)\b/i.test(qLower)) {
-    steps.push(`Identifying trigonometric ratio & angle in degrees (Standard ${grade} ${board})...`);
-    steps.push(`Evaluating exact unit-circle & quotient identities (cos θ / sin θ)...`);
-    steps.push(`Formatting clear trigonometric explanation with KaTeX notation...`);
-  } else if (/[=]|x\^2|x²|\bsolve\b|\bfactor/i.test(qLower)) {
-    steps.push(`Parsing algebraic equation & isolating target variables...`);
-    steps.push(`Computing step-by-step derivation for Standard ${grade} (${board})...`);
-    steps.push(`Verifying roots and boundary conditions...`);
-  } else if (/\b(3d|visualize|visualise|cone|sphere|cylinder|parabola|graph)\b/i.test(qLower)) {
-    steps.push(`Configuring 3D spatial geometry parameters for Standard ${grade}...`);
-    steps.push(`Opening interactive side workspace and computing mensuration formulas...`);
-  } else if (
-    qTrim.includes('?') ||
-    /\b(what|who|why|how|when|where|explain|define|meaning|invented|discovered)\b/i.test(qLower)
-  ) {
-    steps.push(`Searching live web sources (Wikipedia & DuckDuckGo) for "${shortQ}"...`);
-    steps.push(`Cross-checking retrieved facts and definitions...`);
-    steps.push(`Drafting clear, direct answer...`);
-  } else {
-    steps.push(`Checking conversation context (Standard ${grade} ${board})...`);
-    steps.push(`Formulating direct conversational reply...`);
-  }
-
-  return steps;
-}
-
 // Attempt on-device browser AI inference (Chrome Gemini Nano or Microsoft Edge Phi-3.5/Phi-4 Mini via window.ai / LanguageModel)
 async function tryBrowserOnDeviceAI(
   question: string
@@ -398,11 +392,18 @@ function normalizeLatexSyntax(rawText: string): string {
   if (!rawText) return '';
   let text = normalizeLatexDelimiters(rawText);
 
-  // Convert standalone \begin{aligned}...\end{aligned} or \begin{matrix}...\end{matrix} not already wrapped in $$
-  text = text.replace(
-    /(?<!\$)\\begin\{(aligned|matrix|pmatrix|bmatrix|cases)\}([\s\S]*?)\\end\{\1\}(?!\$)/g,
-    (_m, env, body) => `$$\\begin{${env}}${body}\\end{${env}}$$`
-  );
+  // Convert standalone \begin{aligned}...\end{aligned} or \begin{matrix}...\end{matrix} not already wrapped in $$ (Safari-safe, no lookbehind)
+  text = wrapStandaloneLatexEnvironments(text);
+
+  // Ensure $$...$$ display math blocks are separated with blank lines so remark-math never glues consecutive equations inline
+  text = text.replace(/\$\$([\s\S]*?)\$\$/g, (_m, inner: string) => {
+    const body = inner.trim();
+    if (!body) return '';
+    return `\n\n$$\n${body}\n$$\n\n`;
+  });
+
+  // Preserve visual break after standalone bold step headings (e.g. "**Step 2: Split the middle term**\nReplace...")
+  text = text.replace(/^(\*\*[^*\n]+\*\*)\n(?=\S)/gm, '$1\n\n');
 
   // Convert un-delimited "cot(θ) = cos(θ)/sin(θ)" or "sin²θ + cos²θ = 1" style plain-text trig identities into clean KaTeX inline math when outside tables/code
   text = text
@@ -425,7 +426,8 @@ function normalizeLatexSyntax(rawText: string): string {
           '$\\sin^2\\theta + \\cos^2\\theta = 1$'
         );
     })
-    .join('\n');
+    .join('\n')
+    .replace(/\n{3,}/g, '\n\n');
 
   return text;
 }
@@ -577,97 +579,339 @@ function renderFormattedContent(rawText: string): React.ReactNode {
   return <FormattedMathContent rawText={rawText} />;
 }
 
-// Isolated thinking timer card so 200ms timer ticks never re-render the chat thread or input controls
-const LiveThinkingCard: React.FC<{
-  pendingQuestion: string;
-  grade: GradeLevel;
-  board: CurriculumBoard;
+interface LiveStreamState {
+  question: string;
+  thoughtText: string;
+  rawAnswerText: string;
+  modelUsed: string;
+  phase: 'thinking' | 'streaming';
+  startedAt: number;
+  thoughtDurationSec: number | null;
+  isComplete?: boolean;
+}
+
+function prefersReducedMotion(): boolean {
+  if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return false;
+  return window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+}
+
+// Windows 11 Fluent + ChatGPT-inspired live streaming turn:
+// Multi-ring Fluent orb, kinetic neural wave, shimmering thought headline, and adaptive rAF dynamic typing reveal
+const LiveStreamingTurn: React.FC<{
+  streamState: LiveStreamState;
   retryStatus: RetryAttemptInfo | null;
   onStop: () => void;
-}> = React.memo(({ pendingQuestion, grade, board, retryStatus, onStop }) => {
-  const [elapsedMs, setElapsedMs] = useState(0);
-
-  useEffect(() => {
-    const start = Date.now();
-    setElapsedMs(0);
-    const timer = window.setInterval(() => {
-      setElapsedMs(Date.now() - start);
-    }, 200);
-    return () => window.clearInterval(timer);
-  }, [pendingQuestion]);
-
-  const liveSteps = React.useMemo(
-    () => buildLiveThinkingSteps(pendingQuestion, grade, board),
-    [pendingQuestion, grade, board]
+  onTypewriterSettled?: () => void;
+  performanceModeActive?: boolean;
+}> = React.memo(({ streamState, retryStatus, onStop, onTypewriterSettled, performanceModeActive = false }) => {
+  const cadence = React.useMemo(
+    () => getPerformanceCadence(performanceModeActive),
+    [performanceModeActive]
   );
-  const visibleCount = Math.min(liveSteps.length, Math.floor(elapsedMs / 250) + 1);
-  const activeSteps = liveSteps.slice(0, visibleCount);
+  const [elapsedMs, setElapsedMs] = useState(0);
+  const [isThoughtExpanded, setIsThoughtExpanded] = useState(true);
+  const [revealedThoughtLen, setRevealedThoughtLen] = useState(0);
+  const [revealedAnswerLen, setRevealedAnswerLen] = useState(0);
+  const thoughtScrollRef = useRef<HTMLDivElement | null>(null);
+  const hasAutoCollapsedRef = useRef(false);
+  const settledFiredRef = useRef(false);
+
+  const visibleAnswerText = React.useMemo(
+    () => stripPartialSimDirective(streamState.rawAnswerText),
+    [streamState.rawAnswerText]
+  );
+
+  // Refs so the single rAF loop always reads fresh buffered targets without restarting
+  const targetThoughtRef = useRef(streamState.thoughtText);
+  const targetAnswerRef = useRef(visibleAnswerText);
+  const isCompleteRef = useRef(Boolean(streamState.isComplete));
+  const revealedThoughtRef = useRef(0);
+  const revealedAnswerRef = useRef(0);
+  const onSettledRef = useRef(onTypewriterSettled);
+
+  targetThoughtRef.current = streamState.thoughtText;
+  targetAnswerRef.current = visibleAnswerText;
+  isCompleteRef.current = Boolean(streamState.isComplete);
+  onSettledRef.current = onTypewriterSettled;
+
+  // Reset per-turn state whenever a new prompt starts streaming
+  useEffect(() => {
+    setElapsedMs(Math.max(0, Date.now() - streamState.startedAt));
+    hasAutoCollapsedRef.current = false;
+    settledFiredRef.current = false;
+    revealedThoughtRef.current = 0;
+    revealedAnswerRef.current = 0;
+    setRevealedThoughtLen(0);
+    setRevealedAnswerLen(0);
+    setIsThoughtExpanded(true);
+
+    const timer = window.setInterval(() => {
+      setElapsedMs(Math.max(0, Date.now() - streamState.startedAt));
+    }, cadence.thinkingTimerIntervalMs);
+    return () => window.clearInterval(timer);
+  }, [streamState.startedAt, cadence.thinkingTimerIntervalMs]);
+
+  // Smooth adaptive rAF dynamic typewriter loop (throttles commit cadence in Performance Mode)
+  useEffect(() => {
+    let rafId = 0;
+    let lastTs = performance.now();
+    let commitAccumulatorMs = 0;
+    const reduced = prefersReducedMotion();
+    const commitIntervalMs = cadence.typewriterCommitIntervalMs;
+
+    const tick = (now: number) => {
+      const dt = Math.max(0, now - lastTs);
+      lastTs = now;
+      commitAccumulatorMs += dt;
+
+      if (commitAccumulatorMs >= commitIntervalMs || reduced) {
+        const stepMs = commitAccumulatorMs;
+        commitAccumulatorMs = 0;
+
+        const targetThought = targetThoughtRef.current;
+        const targetAnswer = targetAnswerRef.current;
+        const done = isCompleteRef.current;
+
+        if (revealedThoughtRef.current < targetThought.length) {
+          const nextThought = computeNextRevealedLength({
+            currentLength: revealedThoughtRef.current,
+            targetText: targetThought,
+            deltaMs: stepMs,
+            isStreamComplete: done || targetAnswer.length > 0,
+            reducedMotion: reduced,
+          });
+          if (nextThought !== revealedThoughtRef.current) {
+            revealedThoughtRef.current = nextThought;
+            setRevealedThoughtLen(nextThought);
+          }
+        }
+
+        if (revealedAnswerRef.current < targetAnswer.length) {
+          const nextAnswer = computeNextRevealedLength({
+            currentLength: revealedAnswerRef.current,
+            targetText: targetAnswer,
+            deltaMs: stepMs,
+            isStreamComplete: done,
+            reducedMotion: reduced,
+          });
+          if (nextAnswer !== revealedAnswerRef.current) {
+            revealedAnswerRef.current = nextAnswer;
+            setRevealedAnswerLen(nextAnswer);
+          }
+        }
+
+        if (
+          done &&
+          revealedAnswerRef.current >= targetAnswer.length &&
+          !settledFiredRef.current
+        ) {
+          settledFiredRef.current = true;
+          onSettledRef.current?.();
+        }
+      }
+
+      rafId = window.requestAnimationFrame(tick);
+    };
+
+    rafId = window.requestAnimationFrame(tick);
+    return () => window.cancelAnimationFrame(rafId);
+  }, [streamState.startedAt, cadence.typewriterCommitIntervalMs]);
+
+  // Auto-collapse reasoning drawer cleanly the moment answer tokens begin typing
+  useEffect(() => {
+    if (streamState.phase === 'streaming' && !hasAutoCollapsedRef.current) {
+      hasAutoCollapsedRef.current = true;
+      setIsThoughtExpanded(false);
+    }
+  }, [streamState.phase]);
+
+  // Auto-scroll live thought rail to newest reasoning line while expanded
+  useEffect(() => {
+    if (isThoughtExpanded && thoughtScrollRef.current) {
+      thoughtScrollRef.current.scrollTop = thoughtScrollRef.current.scrollHeight;
+    }
+  }, [revealedThoughtLen, isThoughtExpanded]);
+
+  const isThinkingPhase = streamState.phase === 'thinking';
+  const typedThoughtText = streamState.thoughtText.slice(0, revealedThoughtLen);
+  const typedAnswerText = visibleAnswerText.slice(0, revealedAnswerLen);
+  const isActivelyTyping =
+    !streamState.isComplete || revealedAnswerLen < visibleAnswerText.length;
+
+  const liveHeadline = retryStatus
+    ? `Reconnecting (${retryStatus.attempt}/${retryStatus.maxRetries})...`
+    : buildThinkingStageLabel(elapsedMs, streamState.thoughtText);
+
+  const thoughtSecLabel =
+    streamState.thoughtDurationSec !== null
+      ? streamState.thoughtDurationSec.toFixed(1)
+      : (elapsedMs / 1000).toFixed(1);
 
   return (
     <div
-      className="space-y-4 transition-opacity duration-150"
+      className="space-y-4 ai-msg-enter min-w-0"
       data-testid="live-generating-card"
+      data-stream-phase={streamState.phase}
     >
+      {/* Student Prompt Glass Bubble */}
       <div className="flex justify-end">
-        <div className="max-w-2xl rounded-2xl bg-slate-200/80 dark:bg-slate-800/90 text-slate-900 dark:text-slate-100 px-4 py-3 text-sm leading-relaxed shadow-sm">
-          {pendingQuestion}
+        <div className="max-w-full sm:max-w-2xl rounded-2xl fluent-user-bubble text-slate-900 dark:text-slate-100 px-4 py-3 text-sm leading-relaxed break-words">
+          {streamState.question}
         </div>
       </div>
 
-      <div className="rounded-xl border border-sky-500/40 bg-slate-50/90 dark:bg-slate-950/80 overflow-hidden shadow-md">
-        <div className="px-3.5 py-2.5 flex items-center justify-between text-xs font-mono text-sky-500 border-b border-slate-200/60 dark:border-slate-800/80">
-          <span className="inline-flex items-center gap-2">
-            <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0" />
-            <span>
-              {retryStatus
-                ? `Retrying (${retryStatus.attempt}/${retryStatus.maxRetries})...`
-                : 'Thinking...'}
-            </span>
-          </span>
-          <div className="flex items-center gap-2.5">
-            <span className="tabular-nums text-slate-400">
-              {(elapsedMs / 1000).toFixed(1)}s
-            </span>
-            <button
-              type="button"
-              onClick={onStop}
-              className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md border border-rose-500/40 text-rose-500 hover:bg-rose-500/10 text-[11px] font-sans font-medium transition-colors"
+      {/* Windows 11 Fluent Glassmorphism Live Thinking Card / Collapsible Rail */}
+      <div
+        className={
+          isThinkingPhase
+            ? 'rounded-2xl fluent-glass-card fluent-thinking-card px-4 py-3.5 sm:px-5 sm:py-4 space-y-3'
+            : 'space-y-2'
+        }
+      >
+        <div className="flex items-center justify-between gap-3">
+          <button
+            type="button"
+            data-testid="live-thinking-toggle"
+            aria-expanded={isThoughtExpanded}
+            onClick={() => setIsThoughtExpanded((prev) => !prev)}
+            className="inline-flex items-center gap-2.5 text-xs font-medium text-slate-700 dark:text-slate-200 hover:text-slate-950 dark:hover:text-white transition-colors group text-left min-w-0"
+          >
+            {isThinkingPhase ? (
+              <span className="fluent-thinking-orb shrink-0" aria-hidden="true">
+                <span className="fluent-thinking-orb-core" />
+              </span>
+            ) : (
+              <span className="w-5 h-5 rounded-lg bg-sky-500/15 border border-sky-500/30 inline-flex items-center justify-center shrink-0">
+                <Sparkles className="w-3 h-3 text-sky-500" aria-hidden="true" />
+              </span>
+            )}
+            <span
+              className={`truncate max-w-[210px] sm:max-w-md ${
+                isThinkingPhase
+                  ? 'ai-shimmer-text font-semibold text-[13px] tracking-tight'
+                  : 'text-slate-600 dark:text-slate-300'
+              }`}
             >
-              <Square className="w-2.5 h-2.5 fill-current" />
-              <span>Stop</span>
-            </button>
-          </div>
+              {isThinkingPhase ? `${liveHeadline}…` : `Thought for ${thoughtSecLabel}s`}
+            </span>
+            {isThinkingPhase && (
+              <span
+                className="fluent-thinking-wave shrink-0"
+                aria-hidden="true"
+                data-testid="thinking-wave-indicator"
+              >
+                <span />
+                <span />
+                <span />
+                <span />
+              </span>
+            )}
+            {isThinkingPhase && (
+              <span className="tabular-nums text-[11px] font-mono text-slate-500 dark:text-slate-400 shrink-0">
+                {thoughtSecLabel}s
+              </span>
+            )}
+            {streamState.thoughtText.trim().length > 0 &&
+              (isThoughtExpanded ? (
+                <ChevronDown className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+              ) : (
+                <ChevronRight className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+              ))}
+          </button>
+
+          <button
+            type="button"
+            data-testid="live-stop-btn"
+            onClick={onStop}
+            className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg fluent-control hover:border-rose-500/50 text-slate-600 dark:text-slate-200 hover:text-rose-500 text-[11px] font-medium shrink-0"
+          >
+            <Square className="w-2.5 h-2.5 fill-current" />
+            <span>Stop</span>
+          </button>
         </div>
 
-        <div className="px-4 py-3 space-y-2 text-xs font-mono text-slate-600 dark:text-slate-300">
-          {activeSteps.map((stepText, idx) => {
-            const isCurrentStep = idx === activeSteps.length - 1;
-            return (
-              <div key={idx} className="flex items-start gap-2.5">
-                <span className={isCurrentStep ? 'text-sky-400 animate-pulse' : 'text-emerald-500'}>
-                  {isCurrentStep ? '●' : '✓'}
-                </span>
-                <span className={isCurrentStep ? 'text-slate-900 dark:text-white font-medium' : 'text-slate-500 dark:text-slate-400'}>
-                  {stepText}
-                </span>
-              </div>
-            );
-          })}
-          {retryStatus && (
+        {/* Frosted Inset Reasoning Panel (replaces left border stripe with Fluent glass container) */}
+        {isThoughtExpanded && (
+          typedThoughtText.trim().length > 0 || retryStatus ? (
             <div
-              data-testid="retry-backoff-status"
-              className="mt-2 rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-[11px] text-amber-600 dark:text-amber-300 flex items-center gap-2"
+              ref={thoughtScrollRef}
+              data-testid="live-thought-rail"
+              className="rounded-xl fluent-glass-subtle px-3.5 py-2.5 max-h-48 overflow-y-auto space-y-2 text-xs text-slate-600 dark:text-slate-300 leading-relaxed"
             >
-              <RefreshCw className="w-3.5 h-3.5 animate-spin shrink-0" />
-              <span>
-                {retryStatus.reason} — retrying with exponential backoff in{' '}
-                {(retryStatus.delayMs / 1000).toFixed(1)}s (attempt {retryStatus.attempt}/
-                {retryStatus.maxRetries})
+              {typedThoughtText.trim().length > 0 && (
+                <div className="[&_p]:text-xs [&_p]:text-slate-600 dark:[&_p]:text-slate-300 [&_li]:text-xs [&_li]:text-slate-600 dark:[&_li]:text-slate-300 [&_strong]:text-slate-800 dark:[&_strong]:text-slate-100">
+                  <FormattedMathContent rawText={typedThoughtText} />
+                  {isThinkingPhase && (
+                    <span className="fluent-typing-caret" aria-hidden="true" />
+                  )}
+                </div>
+              )}
+              {retryStatus && (
+                <div
+                  data-testid="retry-backoff-status"
+                  className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-[11px] text-amber-700 dark:text-amber-300 flex items-center gap-2"
+                >
+                  <RefreshCw className="w-3.5 h-3.5 animate-spin shrink-0" />
+                  <span>
+                    {retryStatus.reason} — retrying in {(retryStatus.delayMs / 1000).toFixed(1)}s (attempt{' '}
+                    {retryStatus.attempt}/{retryStatus.maxRetries})
+                  </span>
+                </div>
+              )}
+            </div>
+          ) : isThinkingPhase ? (
+            <div
+              className="rounded-xl fluent-glass-subtle px-3.5 py-3 space-y-2.5"
+              aria-hidden="true"
+            >
+              <div className="ai-thought-shimmer-line w-4/5" />
+              <div className="ai-thought-shimmer-line w-3/5" />
+              <div className="ai-thought-shimmer-line w-2/5" />
+            </div>
+          ) : null
+        )}
+      </div>
+
+      {/* Live Dynamic Typewriter Frosted Glass Answer Card */}
+      {visibleAnswerText.length > 0 && (
+        <article
+          data-testid="live-streaming-answer-card"
+          data-revealed-chars={revealedAnswerLen}
+          data-buffered-chars={visibleAnswerText.length}
+          className="rounded-2xl fluent-glass-card p-5 sm:p-6 space-y-3.5 ai-msg-enter"
+        >
+          <div className="flex items-center justify-between gap-2 pb-2.5 border-b border-slate-200/60 dark:border-white/10">
+            <div className="flex items-center gap-2.5 min-w-0">
+              <span className="fluent-thinking-orb shrink-0" aria-hidden="true">
+                <span className="fluent-thinking-orb-core" />
+              </span>
+              <span className="text-xs font-semibold text-slate-900 dark:text-white font-display">
+                Pritesh Sir&apos;s Maths AI
+              </span>
+              <span className="text-xs text-slate-400" aria-hidden="true">·</span>
+              <span className="inline-flex items-center gap-1.5 text-[11px] font-mono text-sky-600 dark:text-sky-400">
+                <span>Typing</span>
+                <span className="fluent-thinking-wave scale-75" aria-hidden="true">
+                  <span />
+                  <span />
+                  <span />
+                  <span />
+                </span>
               </span>
             </div>
-          )}
-        </div>
-      </div>
+          </div>
+
+          <div
+            data-testid="live-typing-body"
+            data-typing-active={isActivelyTyping ? 'true' : 'false'}
+            className={`text-sm text-slate-800 dark:text-slate-100 leading-relaxed ${
+              isActivelyTyping ? 'fluent-typing-active' : ''
+            }`}
+          >
+            <FormattedMathContent rawText={typedAnswerText} />
+          </div>
+        </article>
+      )}
     </div>
   );
 });
@@ -730,12 +974,19 @@ export const DoubtTutorPanel: React.FC<DoubtTutorPanelProps> = React.memo(({
   onSummonTool,
   onDetectCurriculum,
   onOpenFormulaReference,
+  onOpenSimulationsLibrary,
   externalPromptRequest,
+  pedagogy,
+  prefs,
+  onSaveInsight,
+  onSendToNotes,
+  performanceModeActive = false,
 }) => {
   const [selectedModel, setSelectedModel] = useState<string>('gemini-4-hydrogen');
   const [questionInput, setQuestionInput] = useState('');
+  const [zoomedEquationHtml, setZoomedEquationHtml] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
-  const [pendingQuestion, setPendingQuestion] = useState<string | null>(null);
+  const [liveStreamState, setLiveStreamState] = useState<LiveStreamState | null>(null);
   const [expandedThinkingIds, setExpandedThinkingIds] = useState<Record<string, boolean>>({});
   const [retryStatus, setRetryStatus] = useState<RetryAttemptInfo | null>(null);
   const [resumingMsgId, setResumingMsgId] = useState<string | null>(null);
@@ -750,8 +1001,6 @@ export const DoubtTutorPanel: React.FC<DoubtTutorPanelProps> = React.memo(({
   const [socraticMode, setSocraticMode] = useState(false);
   const [hinglishMode, setHinglishMode] = useState(false);
   const [revealedStepsByMsg, setRevealedStepsByMsg] = useState<Record<string, number>>({});
-  const [scratchColor, setScratchColor] = useState<string>('#38bdf8');
-  const [isDrawing, setIsDrawing] = useState(false);
   const [copiedMsgId, setCopiedMsgId] = useState<string | null>(null);
   const [pinnedFormulas, setPinnedFormulas] = useState<Array<{ title: string; latex: string; formula: string }>>([]);
   const [chapterFilter, setChapterFilter] = useState<string>('All');
@@ -776,6 +1025,7 @@ export const DoubtTutorPanel: React.FC<DoubtTutorPanelProps> = React.memo(({
   const [isSpeakingId, setIsSpeakingId] = useState<string | null>(null);
   const [autoVoiceReply, setAutoVoiceReply] = useState(false);
   const [statusFeedback, setStatusFeedback] = useState<string | null>(null);
+  const typewriterSettledResolverRef = useRef<(() => void) | null>(null);
 
   // #5 & #82: Cross-origin safe copy with LaTeX or plain-text support
   const handleCopyMessage = async (msg: TutorMessage, asLatex = false) => {
@@ -806,9 +1056,8 @@ export const DoubtTutorPanel: React.FC<DoubtTutorPanelProps> = React.memo(({
     });
   };
 
-  const inputRef = useRef<HTMLInputElement | null>(null);
+  const inputRef = useRef<HTMLTextAreaElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
-  const scratchCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const streamEndRef = useRef<HTMLDivElement | null>(null);
   const activeFetchAbortRef = useRef<AbortController | null>(null);
   const userHaltedRef = useRef<boolean>(false);
@@ -842,7 +1091,7 @@ export const DoubtTutorPanel: React.FC<DoubtTutorPanelProps> = React.memo(({
     return () => window.clearTimeout(timer);
   }, [questionInput]);
 
-  // #97 & #49: Escape key drawer dismissal & Tab visibility media stream cleanup
+  // #97, #47, #49: Escape key dismissal, Spacebar Push-to-Talk, & Tab visibility media cleanup
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
@@ -850,6 +1099,29 @@ export const DoubtTutorPanel: React.FC<DoubtTutorPanelProps> = React.memo(({
         setShowScratchpad(false);
         setShowBrowserAiGuide(false);
         setShowMathKeyboard(false);
+        setZoomedEquationHtml(null);
+        return;
+      }
+      if (
+        prefs?.pushToTalkEnabled &&
+        e.code === 'Space' &&
+        !e.repeat &&
+        !(e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement || e.target instanceof HTMLSelectElement)
+      ) {
+        e.preventDefault();
+        if (!voiceControllerRef.current?.isActive()) {
+          handleToggleVoiceInput();
+        }
+      }
+    };
+    const onKeyUp = (e: KeyboardEvent) => {
+      if (
+        prefs?.pushToTalkEnabled &&
+        e.code === 'Space' &&
+        voiceControllerRef.current?.isActive() &&
+        !(e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement)
+      ) {
+        voiceControllerRef.current.stop();
       }
     };
     const onVisibilityChange = () => {
@@ -862,21 +1134,23 @@ export const DoubtTutorPanel: React.FC<DoubtTutorPanelProps> = React.memo(({
       }
     };
     window.addEventListener('keydown', onKeyDown);
+    window.addEventListener('keyup', onKeyUp);
     document.addEventListener('visibilitychange', onVisibilityChange);
     return () => {
       window.removeEventListener('keydown', onKeyDown);
+      window.removeEventListener('keyup', onKeyUp);
       document.removeEventListener('visibilitychange', onVisibilityChange);
     };
-  }, [liveMicStreaming]);
+  }, [liveMicStreaming, prefs?.pushToTalkEnabled]);
 
   // Live thinking timer is isolated inside <LiveThinkingCard /> so ticks never re-render the chat thread
 
-  // Auto-scroll to the bottom of the multi-turn conversation thread when new messages arrive
+  // Auto-scroll cleanly when a turn starts, switches from thinking to streaming, or finishes
   useEffect(() => {
-    if (messages.length > 0 || pendingQuestion) {
+    if (messages.length > 0 || liveStreamState) {
       streamEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
     }
-  }, [messages.length, pendingQuestion]);
+  }, [messages.length, liveStreamState?.startedAt, liveStreamState?.phase]);
 
   useEffect(() => {
     return () => {
@@ -895,61 +1169,92 @@ export const DoubtTutorPanel: React.FC<DoubtTutorPanelProps> = React.memo(({
     ctrl.setLang(voiceLang);
   }, [voiceMathMode, handsFreeAutoSend, voiceLang]);
 
-  // #76 & #77: Unified Pointer Events Scratchpad (Supports Mouse, Touch, Apple Pencil, and Surface Stylus)
-  const startScratchDraw = (e: React.PointerEvent<HTMLCanvasElement>) => {
-    const canvas = scratchCanvasRef.current;
-    if (!canvas) return;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-    const rect = canvas.getBoundingClientRect();
-    const scaleX = canvas.width / Math.max(1, rect.width);
-    const scaleY = canvas.height / Math.max(1, rect.height);
-    ctx.strokeStyle = scratchColor;
-    ctx.lineWidth = e.pointerType === 'pen' ? Math.max(1.5, e.pressure * 4) : 2.5;
-    ctx.lineCap = 'round';
-    ctx.lineJoin = 'round';
-    ctx.beginPath();
-    ctx.moveTo((e.clientX - rect.left) * scaleX, (e.clientY - rect.top) * scaleY);
-    setIsDrawing(true);
-  };
+  const isEmptyState = messages.length === 0 && !liveStreamState;
 
-  const moveScratchDraw = (e: React.PointerEvent<HTMLCanvasElement>) => {
-    if (!isDrawing) return;
-    const canvas = scratchCanvasRef.current;
-    if (!canvas) return;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-    const rect = canvas.getBoundingClientRect();
-    const scaleX = canvas.width / Math.max(1, rect.width);
-    const scaleY = canvas.height / Math.max(1, rect.height);
-    ctx.lineTo((e.clientX - rect.left) * scaleX, (e.clientY - rect.top) * scaleY);
-    ctx.stroke();
-  };
+  // Declaratively sync auto-growing textarea height whenever text changes, empties after submit, or viewport resizes
+  useLayoutEffect(() => {
+    const el = inputRef.current;
+    if (!el) return;
+    if (!questionInput) {
+      el.style.height = '';
+      return;
+    }
+    el.style.height = 'auto';
+    el.style.height = `${Math.min(el.scrollHeight, 140)}px`;
+  }, [questionInput, isEmptyState]);
 
-  const endScratchDraw = () => {
-    setIsDrawing(false);
-  };
+  useEffect(() => {
+    const el = inputRef.current;
+    if (!el || typeof ResizeObserver === 'undefined') return;
+    let rafId: number | null = null;
+    const ro = new ResizeObserver(() => {
+      if (rafId !== null) cancelAnimationFrame(rafId);
+      rafId = requestAnimationFrame(() => {
+        rafId = null;
+        const target = inputRef.current;
+        if (!target) return;
+        if (!target.value) {
+          target.style.height = '';
+          return;
+        }
+        target.style.height = 'auto';
+        target.style.height = `${Math.min(target.scrollHeight, 140)}px`;
+      });
+    });
+    ro.observe(el);
+    return () => {
+      if (rafId !== null) cancelAnimationFrame(rafId);
+      ro.disconnect();
+    };
+  }, [isEmptyState]);
 
-  const clearScratchpad = () => {
-    const canvas = scratchCanvasRef.current;
-    if (!canvas) return;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-  };
-
-  // #11: Convert drawn Scratchpad sketch to base64 image and send to Multimodal Vision Solver
-  const solveScratchpadSketch = () => {
-    const canvas = scratchCanvasRef.current;
-    if (!canvas) return;
-    try {
-      const dataUrl = canvas.toDataURL('image/png');
-      const base64Data = dataUrl.includes(',') ? dataUrl.split(',')[1] : '';
-      submitMessage('Recognize and solve the handwritten equation or geometry sketch from my scratchpad step by step', base64Data, 'image/png');
-    } catch {
+  // #11, #31, #35: Convert drawn Scratchpad sketch to base64 image and send to Multimodal Vision Solver
+  const solveScratchpadSketch = (base64Data: string, customPrompt?: string) => {
+    setShowScratchpad(false);
+    const promptText =
+      customPrompt ||
+      'Recognize and solve the handwritten equation or geometry sketch from my scratchpad step by step';
+    if (base64Data) {
+      submitMessage(promptText, base64Data, 'image/png');
+    } else {
       submitMessage('Solve the problem on my scratchpad step by step');
     }
   };
+
+  // #40 Clipboard Paste-Image (Ctrl+V screenshot directly into composer)
+  const handleComposerPaste = async (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    const items = e.clipboardData?.items;
+    if (!items) return;
+    for (let i = 0; i < items.length; i++) {
+      const item = items[i];
+      if (item.type.startsWith('image/')) {
+        const file = item.getAsFile();
+        if (!file) continue;
+        e.preventDefault();
+        setStatusFeedback('Scanning pasted screenshot with Multimodal Vision...');
+        try {
+          const { base64, mimeType } = await compressImageFileToBase64(file, 1280, 0.82);
+          const prompt =
+            questionInput.trim() || 'Read and solve the mathematics problem in this pasted image step by step';
+          submitMessage(prompt, base64, mimeType);
+        } catch {
+          setStatusFeedback('Could not read pasted image. Try Scan Sum instead.');
+        }
+        return;
+      }
+    }
+  };
+
+  // #41 LaTeX Snippet Autocomplete (/frac, /sqrt, /quad, /int, /sum, /pi, /theta)
+  const expandLatexShortcuts = (val: string): string =>
+    val
+      .replace(/(^|\s)\/frac(\s)$/i, '$1\\frac{a}{b}$2')
+      .replace(/(^|\s)\/sqrt(\s)$/i, '$1\\sqrt{x}$2')
+      .replace(/(^|\s)\/quad(\s)$/i, '$1ax^2 + bx + c = 0$2')
+      .replace(/(^|\s)\/int(\s)$/i, '$1\\int $2')
+      .replace(/(^|\s)\/sum(\s)$/i, '$1\\sum_{i=1}^{n} $2')
+      .replace(/(^|\s)\/pi(\s)$/i, '$1π$2')
+      .replace(/(^|\s)\/theta(\s)$/i, '$1θ$2');
 
   // #63: Photo OCR Sum Scanner Handler with Client-Side Image Compression
   const handlePhotoUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -1136,7 +1441,8 @@ export const DoubtTutorPanel: React.FC<DoubtTutorPanelProps> = React.memo(({
     if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
       window.speechSynthesis.cancel();
       const utterance = new SpeechSynthesisUtterance(spokenText);
-      utterance.rate = 0.98;
+      utterance.rate = prefs?.ttsRate ?? 0.98;
+      utterance.lang = prefs?.ttsAccent ?? 'en-IN';
       utterance.onend = () => setIsSpeakingId(null);
       utterance.onerror = () => setIsSpeakingId(null);
       window.speechSynthesis.speak(utterance);
@@ -1222,7 +1528,7 @@ export const DoubtTutorPanel: React.FC<DoubtTutorPanelProps> = React.memo(({
         const attemptController = new AbortController();
         const onOuterAbort = () => attemptController.abort();
         signal.addEventListener('abort', onOuterAbort, { once: true });
-        const attemptTimeout = window.setTimeout(() => attemptController.abort(), 25000);
+        const attemptTimeout = window.setTimeout(() => attemptController.abort(), 38000);
 
         try {
           const response = await fetch('/api/tutor/doubt', {
@@ -1265,7 +1571,7 @@ export const DoubtTutorPanel: React.FC<DoubtTutorPanelProps> = React.memo(({
     rawQuestion: string,
     imageBase64?: string,
     imageMimeType?: string,
-    bypassCache = false
+    _bypassCache = false
   ) => {
     const trimmed = rawQuestion.trim();
     if (!trimmed || isLoading) return;
@@ -1280,37 +1586,31 @@ export const DoubtTutorPanel: React.FC<DoubtTutorPanelProps> = React.memo(({
       activeFetchAbortRef.current.abort();
     }
 
+    const requestStart = Date.now();
     userHaltedRef.current = false;
     setQuestionInput('');
     setInterimTranscript('');
-    setPendingQuestion(trimmed);
+    setLiveStreamState({
+      question: trimmed,
+      thoughtText: '',
+      rawAnswerText: '',
+      modelUsed: selectedModel,
+      phase: 'thinking',
+      startedAt: requestStart,
+      thoughtDurationSec: null,
+    });
     setRetryStatus(null);
     setIsLoading(true);
     setStatusFeedback(null);
 
-    const requestStart = Date.now();
-    const idbKey = `v3:${board}:${grade}:${selectedModel}:${trimmed.toLowerCase()}`;
     const multiTurnHistory = buildChronologicalHistory();
+    let streamedThoughtAcc = '';
+    let streamedAnswerAcc = '';
+    let streamedThoughtDurationSec: number | null = null;
+    let streamedModelLabel = selectedModel;
 
     try {
-      // #53: Check IndexedDB local cache for instant 0ms repeat response when no image is attached
-      if (!bypassCache && !imageBase64 && multiTurnHistory.length <= 2) {
-        const cachedData = await getCachedTutorResponse<TutorMessage>(idbKey);
-        if (cachedData && !cachedData.isInterrupted) {
-          const msgId = `dbt_${Date.now()}`;
-          const cachedMsg: TutorMessage = {
-            ...cachedData,
-            id: msgId,
-            timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-            latencySec: '0.1',
-          };
-          setExpandedThinkingIds((prev) => ({ ...prev, [msgId]: false }));
-          onNewMessage(cachedMsg);
-          return;
-        }
-      }
-
-      // If user selected browser-nano-edge (or if on-device AI is available & selected), try local browser SLM first!
+      // If user explicitly selected browser-nano-edge, try local browser SLM first
       if (selectedModel === 'browser-nano-edge' && !imageBase64) {
         const localReply = await tryBrowserOnDeviceAI(trimmed);
         if (localReply) {
@@ -1329,7 +1629,6 @@ export const DoubtTutorPanel: React.FC<DoubtTutorPanelProps> = React.memo(({
             timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
             latencySec: totalLatencySec,
             modelUsed: 'browser-nano-edge (on-device)',
-            thinkingTrace: [],
           };
           onNewMessage(localMsg);
           return;
@@ -1339,18 +1638,267 @@ export const DoubtTutorPanel: React.FC<DoubtTutorPanelProps> = React.memo(({
       const controller = new AbortController();
       activeFetchAbortRef.current = controller;
 
+      const pedagogyPrefix = pedagogy ? buildPedagogyPromptPrefix(pedagogy, board, grade) : '';
+      const outgoingQuestion = pedagogyPrefix ? `${pedagogyPrefix}${trimmed}` : trimmed;
+
+      const requestPayload: Record<string, unknown> = {
+        question: outgoingQuestion,
+        grade,
+        board,
+        topic: 'Auto-Detected Curriculum Topic',
+        adaptiveRating,
+        model: selectedModel,
+        history: multiTurnHistory,
+        enableWebSearch,
+        ...(imageBase64 ? { imageBase64, imageMimeType } : {}),
+      };
+
+      // Primary path: real-time SSE streaming of Gemini reasoning thoughts + live answer tokens
+      let committedFromStream = false;
+      let streamFallbackNeeded = false;
+
+      try {
+        const streamRes = await fetch('/api/tutor/doubt/stream', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Accept: 'text/event-stream',
+          },
+          body: JSON.stringify(requestPayload),
+          signal: controller.signal,
+        });
+
+        if (!streamRes.ok || !streamRes.body) {
+          streamFallbackNeeded = true;
+        } else {
+          const reader = streamRes.body.getReader();
+          const decoder = new TextDecoder();
+          let sseBuffer = '';
+          let detectedGradeFromStream = grade;
+          let detectedBoardFromStream = board;
+          let summonedToolFromStream: SummonableTool | null = null;
+          let detectedContextText: string | undefined;
+
+          const applyMeta = (
+            rawGrade?: string,
+            rawBoard?: string,
+            rawTool?: string | null,
+            rawModel?: string
+          ) => {
+            if (rawModel) {
+              streamedModelLabel = rawModel;
+            }
+            const nextGrade = (
+              ['8', '9', '10', '11', '12'].includes(String(rawGrade))
+                ? String(rawGrade)
+                : detectedGradeFromStream
+            ) as GradeLevel;
+            const nextBoard = (
+              ['ICSE', 'CBSE'].includes(String(rawBoard))
+                ? String(rawBoard)
+                : detectedBoardFromStream
+            ) as CurriculumBoard;
+            if (nextGrade !== grade || nextBoard !== board) {
+              detectedGradeFromStream = nextGrade;
+              detectedBoardFromStream = nextBoard;
+              onDetectCurriculum(nextGrade, nextBoard);
+              detectedContextText = `Switched context to Grade ${nextGrade} (${nextBoard})`;
+            }
+            const tool = (
+              ['lab', 'practice', 'planner', 'dashboard'].includes(String(rawTool))
+                ? rawTool
+                : null
+            ) as SummonableTool | null;
+            if (tool && tool !== summonedToolFromStream) {
+              summonedToolFromStream = tool;
+              onSummonTool(tool, false);
+            }
+          };
+
+          let doneEvent: Extract<
+            ReturnType<typeof parseSseChunkBuffer>['events'][number],
+            { type: 'done' }
+          > | null = null;
+          let streamErrorEvent: Extract<
+            ReturnType<typeof parseSseChunkBuffer>['events'][number],
+            { type: 'error' }
+          > | null = null;
+
+          while (true) {
+            const { value, done } = await reader.read();
+            if (done) break;
+            const chunkText = decoder.decode(value, { stream: true });
+            const parsed = parseSseChunkBuffer(sseBuffer, chunkText);
+            sseBuffer = parsed.remainder;
+
+            let needsUiFlush = false;
+            for (const ev of parsed.events) {
+              if (ev.type === 'meta') {
+                applyMeta(ev.detectedGrade, ev.detectedBoard, ev.summonTool, ev.modelUsed);
+                needsUiFlush = true;
+              } else if (ev.type === 'thought') {
+                streamedThoughtAcc += ev.delta;
+                needsUiFlush = true;
+              } else if (ev.type === 'token') {
+                if (streamedThoughtDurationSec === null) {
+                  streamedThoughtDurationSec = Math.max(0.1, (Date.now() - requestStart) / 1000);
+                }
+                streamedAnswerAcc += ev.delta;
+                needsUiFlush = true;
+              } else if (ev.type === 'done') {
+                doneEvent = ev;
+                applyMeta(ev.detectedGrade, ev.detectedBoard, ev.summonTool, ev.modelUsed);
+              } else if (ev.type === 'error') {
+                streamErrorEvent = ev;
+              }
+            }
+
+            if (needsUiFlush) {
+              setLiveStreamState((prev) =>
+                prev
+                  ? {
+                      ...prev,
+                      thoughtText: streamedThoughtAcc,
+                      rawAnswerText: streamedAnswerAcc,
+                      modelUsed: streamedModelLabel,
+                      phase: streamedAnswerAcc.length > 0 ? 'streaming' : 'thinking',
+                      thoughtDurationSec: streamedThoughtDurationSec,
+                    }
+                  : prev
+              );
+            }
+          }
+
+          if (streamErrorEvent) {
+            const isConfigErr =
+              streamErrorEvent.retryable === false ||
+              streamErrorEvent.code === 'API_KEY_INVALID' ||
+              streamErrorEvent.code === 'API_NOT_ENABLED' ||
+              streamErrorEvent.code === 'BILLING_REQUIRED' ||
+              streamErrorEvent.code === 'MODEL_NOT_AVAILABLE' ||
+              streamErrorEvent.code === 'GEMINI_KEY_MISSING' ||
+              streamErrorEvent.code === 'GEMINI_QUOTA_EXCEEDED';
+
+            if (isConfigErr) {
+              throw new RetryableHttpError(
+                streamErrorEvent.status || 400,
+                streamErrorEvent.error || 'Gemini API configuration error',
+                {
+                  code: streamErrorEvent.code,
+                  retryable: false,
+                }
+              );
+            }
+            if (!streamedAnswerAcc.trim()) {
+              streamFallbackNeeded = true;
+            }
+          }
+
+          if (doneEvent || (!streamFallbackNeeded && streamedAnswerAcc.trim().length > 0)) {
+            const totalLatencySec = Math.max(0.1, (Date.now() - requestStart) / 1000).toFixed(1);
+            const finalRawReply = doneEvent ? doneEvent.cleanText : streamedAnswerAcc;
+            const parsedDirective = parseAiVisualizerDirective(finalRawReply);
+            const cleanChatReply = parsedDirective.cleanText;
+            const summonedVisualizerSpec =
+              sanitizeVisualizerSpec(doneEvent?.visualizerSpec) ?? parsedDirective.spec ?? null;
+            const finalThoughtText = (doneEvent?.thoughtText || streamedThoughtAcc || '').trim();
+            const thoughtSecStr =
+              streamedThoughtDurationSec !== null
+                ? streamedThoughtDurationSec.toFixed(1)
+                : totalLatencySec;
+            const potentiallyHalted =
+              Boolean(doneEvent?.truncated) || isResponsePotentiallyHalted(cleanChatReply);
+
+            const msgId = `dbt_${Date.now()}`;
+            const newMsg: TutorMessage = {
+              id: msgId,
+              question: trimmed,
+              responseType: 'chat',
+              chatReply: cleanChatReply,
+              conceptTitle: 'AI Assistant',
+              prerequisiteRecap: '',
+              steps: [],
+              finalAnswer: '',
+              examTip: '',
+              timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+              latencySec: totalLatencySec,
+              thoughtDurationSec: finalThoughtText ? thoughtSecStr : undefined,
+              modelUsed: doneEvent?.modelUsed || streamedModelLabel,
+              thoughtText: finalThoughtText || undefined,
+              webSources:
+                doneEvent?.webSources && doneEvent.webSources.length > 0
+                  ? doneEvent.webSources
+                  : undefined,
+              summonedTool: summonedToolFromStream,
+              visualizerSpec: summonedVisualizerSpec,
+              detectedContextText,
+              isInterrupted: potentiallyHalted,
+              interruptedReason: potentiallyHalted
+                ? 'This explanation appears to have stopped early. Click Resume to finish it seamlessly.'
+                : undefined,
+            };
+
+            // Let the dynamic typewriter finish gliding through any final buffered characters smoothly (max 750ms)
+            if (!userHaltedRef.current && streamedAnswerAcc.trim().length > 0) {
+              setLiveStreamState((prev) =>
+                prev
+                  ? {
+                      ...prev,
+                      thoughtText: finalThoughtText || prev.thoughtText,
+                      rawAnswerText: finalRawReply,
+                      phase: 'streaming',
+                      thoughtDurationSec:
+                        streamedThoughtDurationSec ?? Number(thoughtSecStr),
+                      isComplete: true,
+                    }
+                  : prev
+              );
+
+              await new Promise<void>((resolve) => {
+                let settled = false;
+                const finish = () => {
+                  if (settled) return;
+                  settled = true;
+                  typewriterSettledResolverRef.current = null;
+                  resolve();
+                };
+                typewriterSettledResolverRef.current = finish;
+                window.setTimeout(finish, 750);
+              });
+            }
+
+            setExpandedThinkingIds((prev) => ({ ...prev, [msgId]: false }));
+            onNewMessage(newMsg);
+            committedFromStream = true;
+
+            if (autoVoiceReply && !potentiallyHalted) {
+              await speakTutorExplanation(newMsg);
+            }
+          }
+        }
+      } catch (streamErr) {
+        if (userHaltedRef.current || streamErr instanceof RetryableHttpError) {
+          throw streamErr;
+        }
+        // Transient stream interruption before output arrived -> seamlessly fall back to /api/tutor/doubt with backoff
+        if (!streamedAnswerAcc.trim()) {
+          streamFallbackNeeded = true;
+        } else {
+          throw streamErr;
+        }
+      }
+
+      if (committedFromStream) {
+        return;
+      }
+
+      // Reliable non-streaming fallback if SSE stream could not complete before emitting output
+      if (!streamFallbackNeeded) {
+        throw new Error('Empty response received from stream');
+      }
+
       const { result: data, attempts } = await postTutorRequestWithBackoff(
-        {
-          question: trimmed,
-          grade,
-          board,
-          topic: 'Auto-Detected Curriculum Topic',
-          adaptiveRating,
-          model: selectedModel,
-          history: multiTurnHistory,
-          enableWebSearch,
-          ...(imageBase64 ? { imageBase64, imageMimeType } : {}),
-        },
+        requestPayload,
         controller.signal
       );
 
@@ -1384,25 +1932,29 @@ export const DoubtTutorPanel: React.FC<DoubtTutorPanelProps> = React.memo(({
       }
 
       const isChatReply = data.responseType === 'chat';
-      const liveSteps = buildLiveThinkingSteps(trimmed, nextGrade, nextBoard);
-      const baseTrace =
-        Array.isArray(data.thinkingTrace) && data.thinkingTrace.length > 0
-          ? [...data.thinkingTrace]
-          : liveSteps;
-      if (attempts > 1) {
-        baseTrace.push(`Recovered automatically after ${attempts - 1} exponential backoff retry attempt(s).`);
-      }
+      const parsedChatDirective =
+        typeof data.chatReply === 'string'
+          ? parseAiVisualizerDirective(data.chatReply)
+          : { cleanText: '', spec: null };
+      const cleanChatReply =
+        typeof data.chatReply === 'string' ? parsedChatDirective.cleanText : undefined;
+      const summonedVisualizerSpec =
+        sanitizeVisualizerSpec(data.visualizerSpec) ?? parsedChatDirective.spec ?? null;
+      const fallbackThoughtText =
+        typeof data.thoughtText === 'string' && data.thoughtText.trim()
+          ? data.thoughtText.trim()
+          : undefined;
 
       const potentiallyHalted =
         Boolean(data.truncated || data.isInterrupted) ||
-        (isChatReply && isResponsePotentiallyHalted(data.chatReply));
+        (isChatReply && isResponsePotentiallyHalted(cleanChatReply));
 
       const msgId = `dbt_${Date.now()}`;
       const newMsg: TutorMessage = {
         id: msgId,
         question: trimmed,
         responseType: isChatReply ? 'chat' : 'math',
-        chatReply: data.chatReply,
+        chatReply: cleanChatReply,
         suggestedPrompts: Array.isArray(data.suggestedPrompts) ? data.suggestedPrompts : undefined,
         conceptTitle: data.conceptTitle || `${nextBoard} Grade ${nextGrade} Derivation`,
         prerequisiteRecap:
@@ -1423,10 +1975,16 @@ export const DoubtTutorPanel: React.FC<DoubtTutorPanelProps> = React.memo(({
           (isChatReply ? '' : 'Box your final answer with units for full ICSE/CBSE step marks.'),
         timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
         latencySec: totalLatencySec,
+        thoughtDurationSec: fallbackThoughtText ? totalLatencySec : undefined,
         modelUsed: data.modelUsed || selectedModel,
-        thinkingTrace: baseTrace,
+        thoughtText: fallbackThoughtText,
+        thinkingTrace:
+          !fallbackThoughtText && Array.isArray(data.thinkingTrace) && data.thinkingTrace.length > 0
+            ? [...data.thinkingTrace]
+            : undefined,
         webSources: Array.isArray(data.webSources) ? data.webSources : undefined,
         summonedTool,
+        visualizerSpec: summonedVisualizerSpec,
         detectedContextText,
         isInterrupted: potentiallyHalted,
         interruptedReason: potentiallyHalted
@@ -1435,11 +1993,7 @@ export const DoubtTutorPanel: React.FC<DoubtTutorPanelProps> = React.memo(({
         retryCount: attempts - 1,
       };
 
-      // Automatically minimize the thinking panel as soon as the AI starts responding!
       setExpandedThinkingIds((prev) => ({ ...prev, [msgId]: false }));
-      if (!imageBase64 && !potentiallyHalted) {
-        setCachedTutorResponse(idbKey, newMsg);
-      }
       onNewMessage(newMsg);
 
       if (autoVoiceReply && !potentiallyHalted) {
@@ -1462,6 +2016,8 @@ export const DoubtTutorPanel: React.FC<DoubtTutorPanelProps> = React.memo(({
       const fallback = isStructuredApiConfigError
         ? null
         : buildClientInstantFallback(trimmed, grade, board, selectedModel);
+      const partialCleaned = stripPartialSimDirective(streamedAnswerAcc).trim();
+      const partialThought = streamedThoughtAcc.trim();
       const msgId = `dbt_${Date.now()}`;
 
       const haltedMsg: TutorMessage = {
@@ -1469,10 +2025,11 @@ export const DoubtTutorPanel: React.FC<DoubtTutorPanelProps> = React.memo(({
         question: trimmed,
         responseType: 'chat',
         chatReply: wasUserStopped
-          ? `Generation paused before the explanation for **"${trimmed}"** finished.`
+          ? partialCleaned || `Generation paused before the explanation for **"${trimmed}"** finished.`
           : isStructuredApiConfigError
           ? `**Gemini API Setup Needed (${err.code || 'CONFIG_ERROR'})**\n\n${errMsg}`
-          : `${fallback?.chatReply || `The explanation for **"${trimmed}"** was interrupted after automatic retries.`}`,
+          : partialCleaned ||
+            `${fallback?.chatReply || `The explanation for **"${trimmed}"** was interrupted after automatic retries.`}`,
         conceptTitle: isStructuredApiConfigError
           ? `Gemini API Configuration (${selectedModel})`
           : `${board} Grade ${grade} — Interrupted Explanation`,
@@ -1482,29 +2039,27 @@ export const DoubtTutorPanel: React.FC<DoubtTutorPanelProps> = React.memo(({
         examTip: '',
         timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
         latencySec: totalLatencySec,
-        modelUsed: selectedModel,
-        thinkingTrace: [
-          `Started solving "${trimmed.slice(0, 70)}"`,
-          wasUserStopped
-            ? 'Paused by student — ready to resume on demand.'
-            : isStructuredApiConfigError
-            ? `Server reported ${err.code || 'API_ERROR'}: ${errMsg}`
-            : `Automatic exponential backoff retries exhausted (${errMsg}).`,
-        ],
+        thoughtDurationSec: partialThought
+          ? (streamedThoughtDurationSec ?? Number(totalLatencySec)).toFixed(1)
+          : undefined,
+        modelUsed: streamedModelLabel || selectedModel,
+        thoughtText: partialThought || undefined,
         isInterrupted: !isStructuredApiConfigError,
         interruptedReason: wasUserStopped
-          ? 'Explanation paused. Click Resume to finish generating the full answer.'
+          ? 'Explanation paused. Click Resume to continue from where it stopped.'
           : isStructuredApiConfigError
           ? undefined
-          : `Connection interrupted after 3 automatic retries (${errMsg}). Click Resume to complete the explanation.`,
-        retryCount: wasUserStopped || isStructuredApiConfigError ? 0 : 3,
+          : `Connection interrupted (${errMsg}). Click Resume to complete the explanation.`,
+        retryCount: wasUserStopped || isStructuredApiConfigError ? 0 : 1,
       };
 
       setExpandedThinkingIds((prev) => ({ ...prev, [msgId]: false }));
       onNewMessage(haltedMsg);
     } finally {
       userHaltedRef.current = false;
-      setPendingQuestion(null);
+      typewriterSettledResolverRef.current?.();
+      typewriterSettledResolverRef.current = null;
+      setLiveStreamState(null);
       setRetryStatus(null);
       setIsLoading(false);
     }
@@ -1559,10 +2114,18 @@ export const DoubtTutorPanel: React.FC<DoubtTutorPanelProps> = React.memo(({
 
       const resumedLatencySec = Math.max(0.1, (Date.now() - requestStart) / 1000).toFixed(1);
       const isChatReply = data.responseType === 'chat';
+      const parsedResumedDirective =
+        typeof data.chatReply === 'string'
+          ? parseAiVisualizerDirective(data.chatReply)
+          : { cleanText: '', spec: null };
+      const cleanResumedReply =
+        typeof data.chatReply === 'string' ? parsedResumedDirective.cleanText : undefined;
       const mergedChatReply =
-        isChatReply && existingPartial && data.chatReply
-          ? mergeResumedExplanation(existingPartial, String(data.chatReply))
-          : data.chatReply;
+        isChatReply && existingPartial && cleanResumedReply
+          ? mergeResumedExplanation(existingPartial, cleanResumedReply)
+          : cleanResumedReply;
+      const resumedVisualizerSpec =
+        sanitizeVisualizerSpec(data.visualizerSpec) ?? parsedResumedDirective.spec ?? null;
 
       const stillHalted =
         Boolean(data.truncated || data.isInterrupted) ||
@@ -1572,6 +2135,7 @@ export const DoubtTutorPanel: React.FC<DoubtTutorPanelProps> = React.memo(({
         ...prev,
         responseType: isChatReply ? 'chat' : 'math',
         chatReply: isChatReply ? mergedChatReply : prev.chatReply,
+        visualizerSpec: resumedVisualizerSpec ?? prev.visualizerSpec ?? null,
         conceptTitle: data.conceptTitle || prev.conceptTitle,
         prerequisiteRecap:
           data.prerequisiteRecap ||
@@ -1608,8 +2172,6 @@ export const DoubtTutorPanel: React.FC<DoubtTutorPanelProps> = React.memo(({
       }
 
       if (!stillHalted) {
-        const idbKey = `v3:${board}:${grade}:${selectedModel}:${msg.question.toLowerCase()}`;
-        setCachedTutorResponse(idbKey, applyUpdate(msg));
         setStatusFeedback('Explanation resumed and completed.');
       }
     } catch (err) {
@@ -1718,6 +2280,18 @@ export const DoubtTutorPanel: React.FC<DoubtTutorPanelProps> = React.memo(({
             <PenTool className="w-3 h-3" />
             <span>Scratchpad</span>
           </button>
+
+          {onOpenSimulationsLibrary && (
+            <button
+              type="button"
+              onClick={() => onOpenSimulationsLibrary()}
+              title="Browse all 8 interactive math simulations"
+              className="inline-flex items-center gap-1 px-2 py-1 rounded-lg font-mono text-[11px] border border-slate-200 dark:border-slate-800 text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white transition-colors"
+            >
+              <Sliders className="w-3 h-3 text-sky-400" />
+              <span>Simulations</span>
+            </button>
+          )}
 
           <button
             type="button"
@@ -1889,67 +2463,7 @@ export const DoubtTutorPanel: React.FC<DoubtTutorPanelProps> = React.memo(({
         </div>
       )}
 
-      {/* Interactive Digital Whiteboard / Rough-Work Scratchpad with Pointer Events & Solve Sketch */}
-      {showScratchpad && (
-        <div className="rounded-2xl border border-sky-500/30 bg-slate-900/95 p-4 space-y-2.5 shadow-lg">
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <span className="text-xs font-mono text-sky-400 font-semibold">
-              Interactive Rough-Work Scratchpad (Mouse, Touch &amp; Stylus Supported)
-            </span>
-            <div className="flex items-center gap-1.5">
-              {[
-                { label: 'Sky', color: '#38bdf8' },
-                { label: 'Emerald', color: '#34d399' },
-                { label: 'Amber', color: '#fbbf24' },
-              ].map((c) => (
-                <button
-                  key={c.color}
-                  type="button"
-                  onClick={() => setScratchColor(c.color)}
-                  className={`w-5 h-5 rounded-full border ${
-                    scratchColor === c.color ? 'border-white scale-110' : 'border-transparent opacity-70'
-                  }`}
-                  style={{ backgroundColor: c.color }}
-                  title={c.label}
-                />
-              ))}
-              <button
-                type="button"
-                onClick={solveScratchpadSketch}
-                className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-[11px] font-medium bg-sky-500/20 text-sky-300 hover:bg-sky-500/30 border border-sky-500/30"
-              >
-                <Sparkles className="w-3 h-3" />
-                <span>Solve Sketch</span>
-              </button>
-              <button
-                type="button"
-                onClick={clearScratchpad}
-                className="inline-flex items-center gap-1 px-2 py-1 rounded-lg text-[11px] text-slate-300 hover:bg-slate-800"
-              >
-                <Trash2 className="w-3 h-3" />
-                <span>Clear</span>
-              </button>
-              <button
-                type="button"
-                onClick={() => setShowScratchpad(false)}
-                className="p-1 text-slate-400 hover:text-white"
-              >
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-          </div>
-          <canvas
-            ref={scratchCanvasRef}
-            width={720}
-            height={180}
-            onPointerDown={startScratchDraw}
-            onPointerMove={moveScratchDraw}
-            onPointerUp={endScratchDraw}
-            onPointerLeave={endScratchDraw}
-            className="w-full h-44 rounded-xl bg-slate-950 border border-slate-800 cursor-crosshair touch-none"
-          />
-        </div>
-      )}
+      {/* Scratchpad now renders directly inside renderComposer so it works in both empty and active chat views */}
 
       {/* Inline Gemini 3.8 Live (`gemini-3.8-live`) Real-Time Voice Conversation Panel */}
       {isLiveSessionOpen && (
@@ -2034,9 +2548,18 @@ export const DoubtTutorPanel: React.FC<DoubtTutorPanelProps> = React.memo(({
   );
 
   const renderComposer = (isCenteredHero: boolean) => (
+    <div className="w-full max-w-3xl mx-auto min-w-0">
+      {showScratchpad && (
+        <MathScratchpad
+          onSolveSketch={solveScratchpadSketch}
+          onSolveWithPrompt={(b64, customPrompt) => solveScratchpadSketch(b64, customPrompt)}
+          onClose={() => setShowScratchpad(false)}
+          isLoading={isLoading}
+        />
+      )}
     <div
-      className={`w-full max-w-3xl mx-auto rounded-3xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-3 shadow-2xl transition-all ${
-        isCenteredHero ? 'ring-1 ring-sky-500/15' : ''
+      className={`w-full rounded-2xl sm:rounded-3xl fluent-composer-glass p-3 sm:p-3.5 ${
+        isCenteredHero ? 'ring-1 ring-sky-500/15 dark:ring-sky-400/15' : ''
       }`}
     >
       {/* Hidden Photo OCR File Input */}
@@ -2182,15 +2705,27 @@ export const DoubtTutorPanel: React.FC<DoubtTutorPanelProps> = React.memo(({
       )}
 
       <div className="flex items-center gap-2 px-2 py-1">
-        <input
+        <textarea
           ref={inputRef}
           id="doubt-question-input"
-          type="text"
+          name="ai-chat-prompt-no-autofill"
+          rows={1}
+          autoComplete="off"
+          autoCorrect="off"
+          autoCapitalize="sentences"
+          spellCheck={false}
+          data-lpignore="true"
+          data-1p-ignore="true"
+          data-bwignore="true"
+          data-form-type="other"
           disabled={isLoading}
           value={questionInput}
-          onChange={(e) => setQuestionInput(e.target.value)}
+          onChange={(e) => {
+            setQuestionInput(expandLatexShortcuts(e.target.value));
+          }}
+          onPaste={handleComposerPaste}
           onKeyDown={(e) => {
-            if (e.key === 'Enter') {
+            if (e.key === 'Enter' && !e.shiftKey) {
               e.preventDefault();
               submitMessage(questionInput);
             }
@@ -2199,10 +2734,10 @@ export const DoubtTutorPanel: React.FC<DoubtTutorPanelProps> = React.memo(({
             isLoading
               ? 'Thinking...'
               : isListening
-              ? 'Listening... speak your math problem hands-free...'
-              : 'Ask any question, dictate by voice, or type a math problem (e.g. cot 90°, solve x² - 5x + 6 = 0)...'
+              ? 'Listening... speak your math problem...'
+              : 'Ask Pritesh Sir a math question...'
           }
-          className="w-full bg-transparent text-sm sm:text-base text-slate-900 dark:text-slate-100 placeholder:text-slate-400 dark:placeholder:text-slate-500 focus:outline-none py-1.5 disabled:opacity-50"
+          className="w-full resize-none bg-transparent text-sm sm:text-base text-slate-900 dark:text-slate-100 placeholder:text-slate-400 dark:placeholder:text-slate-500 focus:outline-none py-1.5 leading-snug max-h-36 overflow-y-auto disabled:opacity-50"
         />
       </div>
 
@@ -2243,6 +2778,19 @@ export const DoubtTutorPanel: React.FC<DoubtTutorPanelProps> = React.memo(({
             <BookOpen className="w-3.5 h-3.5" />
             <span>Formulas</span>
           </button>
+          {onOpenSimulationsLibrary && (
+            <button
+              type="button"
+              data-testid="open-simulations-drawer-btn"
+              onClick={() => onOpenSimulationsLibrary()}
+              className="inline-flex items-center gap-1 px-2 py-1.5 sm:py-1 rounded-lg text-xs text-slate-500 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors whitespace-nowrap shrink-0"
+              title="Open Interactive Simulations Library (8 Live Labs)"
+              aria-label="Open Simulations Library"
+            >
+              <Sliders className="w-3.5 h-3.5 text-sky-500" />
+              <span>Sims</span>
+            </button>
+          )}
           <button
             type="button"
             onClick={() => setShowScratchpad((prev) => !prev)}
@@ -2296,7 +2844,7 @@ export const DoubtTutorPanel: React.FC<DoubtTutorPanelProps> = React.memo(({
               onClick={handleStopGenerating}
               aria-label="Stop generating"
               title="Stop current response (you can Resume it afterwards)"
-              className="w-8 h-8 rounded-full bg-rose-600 hover:bg-rose-500 text-white flex items-center justify-center transition-all"
+              className="w-8 h-8 rounded-full bg-rose-600 hover:bg-rose-500 text-white flex items-center justify-center transition-all shadow-sm"
             >
               <Square className="w-3.5 h-3.5 fill-current" />
             </button>
@@ -2306,7 +2854,7 @@ export const DoubtTutorPanel: React.FC<DoubtTutorPanelProps> = React.memo(({
               disabled={!questionInput.trim()}
               onClick={() => submitMessage(questionInput)}
               aria-label="Send message"
-              className="w-8 h-8 rounded-full bg-slate-900 dark:bg-sky-500 hover:bg-slate-800 dark:hover:bg-sky-400 disabled:opacity-30 text-white dark:text-slate-950 flex items-center justify-center transition-all"
+              className="w-8 h-8 rounded-full fluent-primary-btn disabled:opacity-35 text-white flex items-center justify-center"
             >
               <ArrowUp className="w-4 h-4 stroke-[2.5]" />
             </button>
@@ -2319,6 +2867,7 @@ export const DoubtTutorPanel: React.FC<DoubtTutorPanelProps> = React.memo(({
           {statusFeedback}
         </p>
       )}
+    </div>
     </div>
   );
 
@@ -2357,16 +2906,18 @@ export const DoubtTutorPanel: React.FC<DoubtTutorPanelProps> = React.memo(({
   };
 
   // EMPTY STATE: Only shown when there are no messages AND no active generation in flight
-  if (messages.length === 0 && !pendingQuestion) {
+  if (messages.length === 0 && !liveStreamState) {
     return (
       <section
         aria-label="Pritesh Sir's Maths AI Chat"
         className="min-h-[64vh] sm:min-h-[76vh] flex flex-col items-center justify-center px-1 sm:px-4 py-4 sm:py-6"
       >
-        <div className="w-full max-w-3xl mx-auto text-center space-y-5 sm:space-y-6 my-auto py-4 sm:py-8">
-          <div className="space-y-2 sm:space-y-2.5">
-            <div className="inline-flex items-center justify-center gap-1.5 text-[11px] sm:text-xs font-mono text-sky-500 dark:text-sky-400">
-              <Sparkles className="w-3.5 h-3.5 shrink-0" />
+        <div className="w-full max-w-3xl mx-auto text-center space-y-6 sm:space-y-7 my-auto py-4 sm:py-8">
+          <div className="space-y-2.5 sm:space-y-3">
+            <div className="inline-flex items-center justify-center gap-2 text-[11px] sm:text-xs font-mono text-sky-600 dark:text-sky-400 tracking-wide">
+              <span className="w-5 h-5 rounded-lg bg-sky-500/15 border border-sky-500/30 inline-flex items-center justify-center shrink-0">
+                <Sparkles className="w-3 h-3 text-sky-500" />
+              </span>
               <span>STANDARD {grade} ({board}) · AI MATHS TUTOR</span>
             </div>
 
@@ -2374,8 +2925,8 @@ export const DoubtTutorPanel: React.FC<DoubtTutorPanelProps> = React.memo(({
               How can I help you today?
             </h1>
 
-            <p className="text-xs sm:text-sm text-slate-500 dark:text-slate-400 max-w-xl mx-auto leading-relaxed px-2">
-              Ask anything, dictate by voice, or try a Standard {grade} ({board}) derivation below.
+            <p className="text-xs sm:text-sm text-slate-600 dark:text-slate-300/90 max-w-xl mx-auto leading-relaxed px-2">
+              Ask any concept or problem, dictate by voice, sketch on the scratchpad, or pick a Standard {grade} ({board}) prompt below.
             </p>
           </div>
 
@@ -2383,16 +2934,17 @@ export const DoubtTutorPanel: React.FC<DoubtTutorPanelProps> = React.memo(({
 
           <div
             aria-label="Calibrated quick prompts"
-            className="flex flex-wrap items-center justify-center gap-2 pt-1 max-w-3xl mx-auto"
+            className="flex flex-wrap items-center justify-center gap-2.5 pt-1 max-w-3xl mx-auto"
           >
             {starterPrompts.map((promptText) => (
               <button
                 key={promptText}
                 type="button"
                 onClick={() => submitMessage(promptText)}
-                className="px-3 py-1.5 rounded-lg border border-slate-200 dark:border-slate-800 bg-white/80 dark:bg-slate-900/70 hover:border-sky-500/60 text-xs text-slate-700 dark:text-slate-300 hover:text-sky-600 dark:hover:text-sky-300 transition-colors"
+                className="group inline-flex items-center gap-2 px-3.5 py-2 rounded-xl fluent-glass-subtle hover:border-sky-500/45 hover:-translate-y-0.5 text-xs font-medium text-slate-700 dark:text-slate-200 hover:text-sky-700 dark:hover:text-sky-300 transition-all"
               >
-                {promptText}
+                <span>{promptText}</span>
+                <ArrowRight className="w-3 h-3 text-slate-400 group-hover:text-sky-500 group-hover:translate-x-0.5 transition-all shrink-0" />
               </button>
             ))}
           </div>
@@ -2418,7 +2970,7 @@ export const DoubtTutorPanel: React.FC<DoubtTutorPanelProps> = React.memo(({
     >
       {/* Chapter Filter, Thread Search, Reading Size, Markdown Export & Print Controls */}
       {chronologicalThread.length >= 1 && (
-        <div className="no-print flex flex-col gap-2 rounded-xl border border-slate-200/70 dark:border-slate-800/80 bg-white/80 dark:bg-slate-900/70 px-3 py-2 text-xs">
+        <div className="no-print flex flex-col gap-2 rounded-2xl fluent-glass-subtle px-3 py-2 text-xs">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <div className="flex flex-wrap items-center gap-1">
               {['All', 'Trigonometry', 'Algebra', 'Mensuration', 'Commercial', 'Calculus'].map((chap) => (
@@ -2426,10 +2978,10 @@ export const DoubtTutorPanel: React.FC<DoubtTutorPanelProps> = React.memo(({
                   key={chap}
                   type="button"
                   onClick={() => setChapterFilter(chap)}
-                  className={`px-2.5 py-1 rounded-md text-xs font-medium transition-colors ${
+                  className={`px-2.5 py-1 rounded-lg text-xs font-medium transition-colors ${
                     chapterFilter === chap
-                      ? 'bg-sky-500 text-slate-950 font-semibold'
-                      : 'text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800'
+                      ? 'fluent-primary-btn text-white font-semibold'
+                      : 'text-slate-600 dark:text-slate-300 hover:bg-white/70 dark:hover:bg-white/10'
                   }`}
                 >
                   {chap}
@@ -2441,12 +2993,16 @@ export const DoubtTutorPanel: React.FC<DoubtTutorPanelProps> = React.memo(({
               <div className="relative">
                 <Search className="w-3 h-3 text-slate-400 absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
                 <input
-                  type="text"
+                  type="search"
+                  name="thread-filter-no-autofill"
+                  autoComplete="off"
+                  data-lpignore="true"
+                  data-form-type="other"
                   value={threadSearchQuery}
                   onChange={(e) => setThreadSearchQuery(e.target.value)}
                   placeholder="Filter thread..."
                   aria-label="Filter conversation messages"
-                  className="w-32 sm:w-40 pl-7 pr-2 py-1 rounded-md border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950 text-xs text-slate-800 dark:text-slate-200 placeholder:text-slate-400 focus:outline-none focus:border-sky-500"
+                  className="w-32 sm:w-40 pl-7 pr-2 py-1 rounded-lg border border-slate-200/80 dark:border-white/10 bg-white/70 dark:bg-slate-950/60 text-xs text-slate-800 dark:text-slate-100 placeholder:text-slate-400 focus:outline-none focus:border-sky-500"
                 />
               </div>
 
@@ -2507,18 +3063,11 @@ export const DoubtTutorPanel: React.FC<DoubtTutorPanelProps> = React.memo(({
           const isThinkingOpen = !!expandedThinkingIds[msg.id];
           const isChatBubble = msg.responseType === 'chat' || (!!msg.chatReply && msg.steps.length === 0);
           const chapterTag = classifyMessageChapter(msg);
-          const isTrigMsg =
-            chapterTag === 'Trigonometry' &&
-            /\b(sin|cos|tan|cot|sec|cosec|csc|degree|angle|trigonometr)\b/i.test(
-              `${msg.question} ${msg.chatReply || ''} ${msg.finalAnswer || ''}`
-            );
-          const angleMatch = msg.question.match(/\b(0|30|45|60|90|120|135|150|180)\b/);
-          const initialTrigAngle = angleMatch ? Number(angleMatch[1]) : 30;
-
-          const quadPlotMatch = msg.question
-            .replace(/−/g, '-')
-            .replace(/²/g, '^2')
-            .match(/([+-]?\s*\d*)\s*x\^2\s*([+-]\s*\d*)\s*x\s*([+-]\s*\d+)/i);
+          // Only display an inline simulation when explicitly summoned by the AI (or deterministic math engine)
+          const parsedDisplayReply = msg.chatReply ? parseAiVisualizerDirective(msg.chatReply) : null;
+          const displayChatReply = parsedDisplayReply ? parsedDisplayReply.cleanText : '';
+          const inlineVisualizerSpec =
+            sanitizeVisualizerSpec(msg.visualizerSpec) ?? parsedDisplayReply?.spec ?? null;
 
           const totalSteps = msg.steps.length;
           const visibleStepsCount = socraticMode
@@ -2528,93 +3077,105 @@ export const DoubtTutorPanel: React.FC<DoubtTutorPanelProps> = React.memo(({
           return (
             <div
               key={msg.id}
-              className="space-y-4 transition-all duration-300"
+              className="space-y-4 min-w-0 ai-msg-enter"
             >
               {/* User Prompt Turn with #10 Editable Prompt Action */}
-              <div className="flex justify-end items-center gap-2 group">
+              <div className="flex justify-end items-center gap-2 group min-w-0">
                 <button
                   type="button"
                   onClick={() => {
                     setQuestionInput(msg.question);
                     inputRef.current?.focus();
                   }}
-                  className="no-print opacity-0 group-hover:opacity-100 focus:opacity-100 p-1.5 rounded-lg text-xs text-slate-400 hover:text-sky-500 hover:bg-slate-100 dark:hover:bg-slate-800 transition-opacity"
+                  className="no-print opacity-0 group-hover:opacity-100 focus:opacity-100 p-1.5 rounded-lg text-xs text-slate-400 hover:text-sky-500 hover:bg-slate-100 dark:hover:bg-slate-800 transition-opacity shrink-0"
                   title="Edit and re-ask this question"
                   aria-label="Edit question"
                 >
                   <Edit3 className="w-3.5 h-3.5" />
                 </button>
-                <div className="max-w-2xl rounded-2xl bg-slate-200/80 dark:bg-slate-800/90 text-slate-900 dark:text-slate-100 px-4 py-3 text-sm leading-relaxed shadow-sm">
+                <div className="max-w-full sm:max-w-2xl rounded-2xl fluent-user-bubble text-slate-900 dark:text-slate-100 px-4 py-3 text-sm leading-relaxed break-words overflow-hidden">
                   {msg.question}
                 </div>
               </div>
 
               {/* Auto-Detected Curriculum Notice */}
               {msg.detectedContextText && (
-                <div className="text-xs font-mono text-sky-500 flex items-center gap-1.5">
+                <div className="text-xs font-mono text-sky-600 dark:text-sky-400 flex items-center gap-1.5">
                   <Sparkles className="w-3.5 h-3.5" />
                   <span>{msg.detectedContextText}</span>
                 </div>
               )}
 
-              {/* Minimized Thinking Panel (automatically minimized once AI starts responding; click to expand) */}
-              {msg.thinkingTrace && msg.thinkingTrace.length > 0 && (
-                <div className="no-print rounded-xl border border-slate-200/70 dark:border-slate-800/80 bg-slate-50/70 dark:bg-slate-950/60 overflow-hidden transition-all">
+              {/* Windows 11 Fluent Collapsible Reasoning Disclosure (frosted inset panel, zero left accent stripe) */}
+              {(Boolean(msg.thoughtText?.trim()) ||
+                (msg.thinkingTrace && msg.thinkingTrace.length > 0)) && (
+                <div className="no-print space-y-2">
                   <button
                     type="button"
+                    data-testid="completed-thinking-toggle"
+                    aria-expanded={isThinkingOpen}
                     onClick={() =>
                       setExpandedThinkingIds((prev) => ({
                         ...prev,
                         [msg.id]: !prev[msg.id],
                       }))
                     }
-                    className="w-full px-3.5 py-2 flex items-center justify-between text-xs font-mono text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-slate-200 transition-colors"
+                    className="inline-flex items-center gap-2 px-2.5 py-1 rounded-lg fluent-glass-subtle text-xs font-medium text-slate-600 dark:text-slate-300 hover:text-slate-950 dark:hover:text-white hover:border-sky-500/40 transition-colors"
                   >
-                    <span className="inline-flex items-center gap-2">
-                      {isThinkingOpen ? (
-                        <ChevronDown className="w-3.5 h-3.5 text-sky-500" />
-                      ) : (
-                        <ChevronRight className="w-3.5 h-3.5 text-sky-500" />
-                      )}
-                      <span>Thought for {msg.latencySec || '0.3'}s</span>
+                    <Sparkles className="w-3.5 h-3.5 text-sky-500 shrink-0" aria-hidden="true" />
+                    <span>
+                      Thought for {msg.thoughtDurationSec || msg.latencySec || '1.0'}s
                     </span>
-                    <span>{isThinkingOpen ? 'Minimize thinking' : 'Show thinking'}</span>
+                    {isThinkingOpen ? (
+                      <ChevronDown className="w-3.5 h-3.5 text-slate-400" />
+                    ) : (
+                      <ChevronRight className="w-3.5 h-3.5 text-slate-400" />
+                    )}
                   </button>
 
                   {isThinkingOpen && (
-                    <div className="px-4 pb-3 pt-1.5 border-t border-slate-200/50 dark:border-slate-800/60 space-y-1.5 text-xs font-mono text-slate-600 dark:text-slate-400">
-                      {msg.thinkingTrace.map((traceLine, tIdx) => (
-                        <div key={tIdx} className="flex items-start gap-2">
-                          <span className="text-emerald-500">✓</span>
-                          <span>{traceLine}</span>
+                    <div
+                      data-testid="completed-thought-content"
+                      className="rounded-xl fluent-glass-subtle px-3.5 py-2.5 max-h-64 overflow-y-auto space-y-1.5 text-xs text-slate-600 dark:text-slate-300 leading-relaxed"
+                    >
+                      {msg.thoughtText?.trim() ? (
+                        <div className="[&_p]:text-xs [&_p]:text-slate-600 dark:[&_p]:text-slate-300 [&_li]:text-xs [&_li]:text-slate-600 dark:[&_li]:text-slate-300 [&_strong]:text-slate-800 dark:[&_strong]:text-slate-100">
+                          <FormattedMathContent rawText={msg.thoughtText} />
                         </div>
-                      ))}
+                      ) : (
+                        (msg.thinkingTrace || []).map((traceLine, tIdx) => (
+                          <div key={tIdx} className="flex items-start gap-2 font-mono">
+                            <span className="text-emerald-500">✓</span>
+                            <span>{traceLine}</span>
+                          </div>
+                        ))
+                      )}
                     </div>
                   )}
                 </div>
               )}
 
-              {/* CASE A: NATURAL CONVERSATIONAL CHAT BUBBLE */}
+              {/* CASE A: NATURAL CONVERSATIONAL FLUENT GLASS CARD */}
               {isChatBubble ? (
                 <article
                   data-testid="conversational-reply-card"
-                  className={`rounded-2xl border border-slate-200/80 dark:border-slate-800/90 bg-white/95 dark:bg-slate-900/90 ${
-                    compactDensity ? 'p-4 space-y-3' : 'p-5 space-y-4'
-                  } shadow-sm`}
+                  className={`rounded-2xl fluent-glass-card ${
+                    compactDensity ? 'p-4 space-y-3' : 'p-5 sm:p-6 space-y-4'
+                  }`}
                 >
-                  <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-center justify-between gap-2 flex-wrap pb-2.5 border-b border-slate-200/60 dark:border-white/10">
                     <div className="flex items-center gap-2.5">
-                      <div className="w-6 h-6 rounded-lg bg-sky-500/15 border border-sky-500/30 flex items-center justify-center text-sky-400">
+                      <div className="w-6 h-6 rounded-lg bg-sky-500/15 border border-sky-500/30 flex items-center justify-center text-sky-500 dark:text-sky-400">
                         <Sparkles className="w-3.5 h-3.5" />
                       </div>
-                      <span className="text-xs font-semibold text-slate-900 dark:text-white">
+                      <span className="text-xs font-semibold text-slate-900 dark:text-white font-display">
                         Pritesh Sir&apos;s Maths AI
                       </span>
                       <span className="text-xs text-slate-400" aria-hidden="true">·</span>
                       <span className="text-xs text-slate-500 dark:text-slate-400">{chapterTag}</span>
                     </div>
 
-                    <div className="no-print flex items-center gap-1.5">
+                    <div className="no-print flex items-center gap-1">
                       <button
                         type="button"
                         onClick={() => handleCopyMessage(msg, false)}
@@ -2642,11 +3203,111 @@ export const DoubtTutorPanel: React.FC<DoubtTutorPanelProps> = React.memo(({
                         <Volume2 className="w-3.5 h-3.5 text-sky-500" />
                         <span>{isSpeakingId === msg.id ? 'Stop' : 'Listen'}</span>
                       </button>
+
+                      <button
+                        type="button"
+                        data-testid="regenerate-reply-btn"
+                        disabled={isLoading || resumingMsgId !== null}
+                        onClick={() => submitMessage(msg.question, undefined, undefined, true)}
+                        className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 disabled:opacity-40 transition-colors"
+                        title="Regenerate a fresh explanation"
+                      >
+                        <RefreshCw className="w-3.5 h-3.5 text-slate-400" />
+                        <span className="hidden sm:inline">Regenerate</span>
+                      </button>
                     </div>
                   </div>
 
-                  <div className="text-sm text-slate-800 dark:text-slate-200 leading-relaxed">
-                    {renderFormattedContent(msg.chatReply || '')}
+                  <div
+                    className="text-sm text-slate-800 dark:text-slate-200 leading-relaxed"
+                    onClick={(e) => {
+                      const target = e.target as HTMLElement | null;
+                      const katexEl = target?.closest('.katex') as HTMLElement | null;
+                      if (katexEl) {
+                        setZoomedEquationHtml(katexEl.outerHTML);
+                      }
+                    }}
+                  >
+                    {renderFormattedContent(displayChatReply)}
+                  </div>
+
+                  {/* #8 Automatic Common Trap Warnings */}
+                  {(() => {
+                    const traps = detectCommonMathTraps(`${msg.question} ${displayChatReply}`);
+                    if (traps.length === 0) return null;
+                    return (
+                      <div className="no-print rounded-xl border border-amber-500/25 bg-amber-500/8 px-3 py-2 text-xs space-y-1">
+                        <div className="font-semibold text-amber-700 dark:text-amber-300 flex items-center gap-1.5">
+                          <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+                          <span>Common Exam Trap to Watch</span>
+                        </div>
+                        <p className="text-[11px] text-slate-700 dark:text-slate-300 leading-relaxed">
+                          <strong className="text-slate-900 dark:text-white">{traps[0].title}:</strong>{' '}
+                          {traps[0].warning}
+                        </p>
+                      </div>
+                    );
+                  })()}
+
+                  {/* #3 ELI-Stuck, #6 Twin Problem, #67 Pin to Insights, #69 Send to Notes */}
+                  <div className="no-print flex flex-wrap items-center gap-1.5 pt-1 border-t border-slate-200/60 dark:border-white/10">
+                    <button
+                      type="button"
+                      disabled={isLoading}
+                      onClick={() =>
+                        submitMessage(
+                          `Explain this more simply like I am stuck, using a clear everyday analogy and smaller steps: ${msg.question}`
+                        )
+                      }
+                      className="px-2 py-1 rounded-lg text-[11px] font-medium fluent-control text-slate-600 dark:text-slate-300 disabled:opacity-40"
+                    >
+                      Simpler
+                    </button>
+                    <button
+                      type="button"
+                      disabled={isLoading}
+                      onClick={() => {
+                        const twin = generateTwinProblem(msg.question, grade);
+                        submitMessage(
+                          `Give me this twin practice problem and wait or guide me step by step: ${twin}`
+                        );
+                      }}
+                      className="px-2 py-1 rounded-lg text-[11px] font-medium fluent-control text-slate-600 dark:text-slate-300 disabled:opacity-40"
+                    >
+                      Twin Problem
+                    </button>
+                    {onSaveInsight && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          onSaveInsight({
+                            id: `ins_${Date.now()}`,
+                            title: msg.question.slice(0, 64),
+                            chapter: chapterTag,
+                            content: displayChatReply.slice(0, 420),
+                            createdAt: new Date().toISOString(),
+                          });
+                          setStatusFeedback('Pinned to Saved Insights in Studio.');
+                        }}
+                        className="inline-flex items-center gap-1 px-2 py-1 rounded-lg text-[11px] font-medium fluent-control text-slate-600 dark:text-slate-300"
+                      >
+                        <Pin className="w-3 h-3 text-amber-500" />
+                        <span>Pin Insight</span>
+                      </button>
+                    )}
+                    {onSendToNotes && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          onSendToNotes(msg.question.slice(0, 60), chapterTag, displayChatReply);
+                          setStatusFeedback('Saved to Markdown Revision Notes in Studio.');
+                        }}
+                        className="inline-flex items-center gap-1 px-2 py-1 rounded-lg text-[11px] font-medium fluent-control text-slate-600 dark:text-slate-300"
+                      >
+                        <BookOpen className="w-3 h-3 text-sky-500" />
+                        <span>Save Note</span>
+                      </button>
+                    )}
                   </div>
 
                   {/* Interrupted / Halted Explanation Recovery Bar with Resume & Retry Controls */}
@@ -2701,8 +3362,25 @@ export const DoubtTutorPanel: React.FC<DoubtTutorPanelProps> = React.memo(({
                     </div>
                   )}
 
-                  {/* #3 & #4: Interactive Unit Circle & Right-Triangle SVG Widget on Trigonometry Answers */}
-                  {isTrigMsg && <InteractiveTrigVisualizer initialAngleDeg={initialTrigAngle} />}
+                  {/* AI-Summoned Interactive Simulation (only shown when explicitly summoned by AI) */}
+                  {inlineVisualizerSpec && (
+                    <div className="space-y-1">
+                      <InlineMathVisualizer spec={inlineVisualizerSpec} />
+                      {onOpenSimulationsLibrary && (
+                        <div className="no-print flex justify-end">
+                          <button
+                            type="button"
+                            data-testid="expand-sim-in-library-btn"
+                            onClick={() => onOpenSimulationsLibrary(inlineVisualizerSpec)}
+                            className="inline-flex items-center gap-1.5 text-[11px] font-medium text-sky-600 dark:text-sky-400 hover:underline"
+                          >
+                            <Sliders className="w-3 h-3" />
+                            <span>Open in Simulations Library</span>
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  )}
 
                   {msg.webSources && msg.webSources.length > 0 && (
                     <div className="pt-2 border-t border-slate-100 dark:border-slate-800/80 space-y-1.5">
@@ -2732,18 +3410,18 @@ export const DoubtTutorPanel: React.FC<DoubtTutorPanelProps> = React.memo(({
                   )}
                 </article>
               ) : (
-                /* CASE B: STEP-BY-STEP MATHEMATICAL DERIVATION CARD */
+                /* CASE B: STEP-BY-STEP MATHEMATICAL DERIVATION FLUENT GLASS CARD */
                 <article
-                  className={`rounded-2xl border border-slate-200/80 dark:border-slate-800/90 bg-white/95 dark:bg-slate-900/90 ${
+                  className={`rounded-2xl fluent-glass-card ${
                     compactDensity ? 'p-4 space-y-3' : 'p-5 sm:p-6 space-y-4'
-                  } shadow-sm`}
+                  }`}
                 >
-                  <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 dark:border-slate-800 pb-3">
+                  <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-200/60 dark:border-white/10 pb-3">
                     <div className="flex items-center gap-2.5">
-                      <div className="w-6 h-6 rounded-lg bg-sky-500/15 border border-sky-500/30 flex items-center justify-center text-sky-400">
+                      <div className="w-6 h-6 rounded-lg bg-sky-500/15 border border-sky-500/30 flex items-center justify-center text-sky-500 dark:text-sky-400">
                         <Sparkles className="w-3.5 h-3.5" />
                       </div>
-                      <h2 className="text-sm font-semibold text-slate-900 dark:text-white">
+                      <h2 className="text-sm font-semibold text-slate-900 dark:text-white font-display">
                         {msg.conceptTitle}
                       </h2>
                     </div>
@@ -2752,7 +3430,7 @@ export const DoubtTutorPanel: React.FC<DoubtTutorPanelProps> = React.memo(({
                       <button
                         type="button"
                         onClick={() => handleCopyMessage(msg, false)}
-                        className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
+                        className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs text-slate-600 dark:text-slate-300 hover:bg-white/70 dark:hover:bg-white/10 transition-colors"
                         title="Copy solution"
                       >
                         {copiedMsgId === msg.id ? (
@@ -2771,7 +3449,7 @@ export const DoubtTutorPanel: React.FC<DoubtTutorPanelProps> = React.memo(({
                       <button
                         type="button"
                         onClick={() => onSaveDoubtToCloud(msg)}
-                        className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
+                        className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs text-slate-600 dark:text-slate-300 hover:bg-white/70 dark:hover:bg-white/10 transition-colors"
                         title="Save derivation to notebook"
                       >
                         <BookmarkCheck
@@ -2785,7 +3463,7 @@ export const DoubtTutorPanel: React.FC<DoubtTutorPanelProps> = React.memo(({
                       <button
                         type="button"
                         onClick={() => speakTutorExplanation(msg)}
-                        className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
+                        className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs text-slate-600 dark:text-slate-300 hover:bg-white/70 dark:hover:bg-white/10 transition-colors"
                       >
                         <Volume2 className="w-3.5 h-3.5 text-sky-500" />
                         <span>{isSpeakingId === msg.id ? 'Stop' : 'Listen'}</span>
@@ -2793,16 +3471,16 @@ export const DoubtTutorPanel: React.FC<DoubtTutorPanelProps> = React.memo(({
                     </div>
                   </div>
 
-                  <div className="text-xs text-slate-500 dark:text-slate-400 leading-relaxed border-l-2 border-sky-500/50 pl-3">
-                    <strong className="text-slate-700 dark:text-slate-200">Prerequisite Recap: </strong>
+                  <div className="rounded-xl fluent-glass-subtle px-3.5 py-2.5 text-xs text-slate-600 dark:text-slate-300 leading-relaxed">
+                    <strong className="text-slate-800 dark:text-slate-100">Prerequisite Recap: </strong>
                     {renderFormattedContent(msg.prerequisiteRecap)}
                   </div>
 
-                  <ol className="space-y-2 text-xs sm:text-sm text-slate-800 dark:text-slate-200">
+                  <ol className="space-y-2 text-xs sm:text-sm text-slate-800 dark:text-slate-100">
                     {msg.steps.slice(0, visibleStepsCount).map((stepStr, idx) => (
                       <li
                         key={idx}
-                        className="rounded-xl bg-slate-50 dark:bg-slate-950/70 border border-slate-200/60 dark:border-slate-800/80 px-3.5 py-2.5 leading-relaxed"
+                        className="rounded-xl fluent-glass-subtle px-3.5 py-2.5 leading-relaxed"
                       >
                         {renderFormattedContent(stepStr)}
                       </li>
@@ -2828,20 +3506,25 @@ export const DoubtTutorPanel: React.FC<DoubtTutorPanelProps> = React.memo(({
                     </button>
                   )}
 
-                  {/* #3 & #8: Embedded Interactive Trigonometry or 2D Quadratic Function Graph */}
-                  {isTrigMsg && <InteractiveTrigVisualizer initialAngleDeg={initialTrigAngle} />}
-                  {quadPlotMatch && (() => {
-                    const aRaw = quadPlotMatch[1].replace(/\s+/g, '');
-                    const bRaw = quadPlotMatch[2].replace(/\s+/g, '');
-                    const cRaw = quadPlotMatch[3].replace(/\s+/g, '');
-                    const aVal = aRaw === '' || aRaw === '+' ? 1 : aRaw === '-' ? -1 : Number(aRaw);
-                    const bVal = bRaw === '+' ? 1 : bRaw === '-' ? -1 : Number(bRaw);
-                    const cVal = Number(cRaw);
-                    if (!Number.isNaN(aVal) && aVal !== 0 && !Number.isNaN(bVal) && !Number.isNaN(cVal)) {
-                      return <InteractiveQuadraticPlotter a={aVal} b={bVal} c={cVal} />;
-                    }
-                    return null;
-                  })()}
+                  {/* AI-Summoned Interactive Simulation for Math Derivation */}
+                  {inlineVisualizerSpec && (
+                    <div className="space-y-1">
+                      <InlineMathVisualizer spec={inlineVisualizerSpec} />
+                      {onOpenSimulationsLibrary && (
+                        <div className="no-print flex justify-end">
+                          <button
+                            type="button"
+                            data-testid="expand-sim-in-library-btn"
+                            onClick={() => onOpenSimulationsLibrary(inlineVisualizerSpec)}
+                            className="inline-flex items-center gap-1.5 text-[11px] font-medium text-sky-600 dark:text-sky-400 hover:underline"
+                          >
+                            <Sliders className="w-3 h-3" />
+                            <span>Open in Simulations Library</span>
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  )}
 
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1 text-xs">
                     <div className="rounded-xl border border-emerald-500/25 bg-emerald-500/5 p-3">
@@ -2867,24 +3550,60 @@ export const DoubtTutorPanel: React.FC<DoubtTutorPanelProps> = React.memo(({
           );
         })}
 
-        {/* REAL-TIME EXPANDED THINKING PANEL (Shows actual text of what AI is doing in real time, then minimizes when AI responds) */}
-        {pendingQuestion && (
-          <LiveThinkingCard
-            pendingQuestion={pendingQuestion}
-            grade={grade}
-            board={board}
+        {/* REAL-TIME LIVE STREAMING TURN (Fluent Thinking Animations + Dynamic Typewriter Reveal) */}
+        {liveStreamState && (
+          <LiveStreamingTurn
+            streamState={liveStreamState}
             retryStatus={retryStatus}
             onStop={handleStopGenerating}
+            performanceModeActive={performanceModeActive}
+            onTypewriterSettled={() => {
+              typewriterSettledResolverRef.current?.();
+            }}
           />
         )}
 
         <div ref={streamEndRef} className="h-4 scroll-mb-44" />
       </div>
 
-      {/* Bottom Docked Composer */}
-      <div className="sticky bottom-[60px] md:bottom-0 z-20 pb-3 sm:pb-4 pt-5 bg-gradient-to-t from-slate-50 via-slate-50/95 to-transparent dark:from-slate-950 dark:via-slate-950/95 dark:to-transparent">
+      {/* Bottom Docked Acrylic Composer */}
+      <div className="sticky bottom-[68px] md:bottom-0 z-20 pb-3 sm:pb-4 pt-5 min-w-0 bg-gradient-to-t from-[#edf2f8] via-[#edf2f8]/70 to-transparent dark:from-[#070b14] dark:via-[#070b14]/70 dark:to-transparent">
         {renderComposer(false)}
       </div>
+
+      {/* #81 Click-to-Zoom Equation Modal */}
+      {zoomedEquationHtml && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/60 backdrop-blur-sm p-4"
+          onClick={() => setZoomedEquationHtml(null)}
+          role="dialog"
+          aria-modal="true"
+          aria-label="Zoomed mathematical equation"
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="max-w-2xl w-full rounded-2xl fluent-glass-panel border p-6 space-y-4 text-center"
+          >
+            <div className="flex items-center justify-between">
+              <span className="text-xs font-semibold text-slate-700 dark:text-slate-200">
+                Equation Zoom View
+              </span>
+              <button
+                type="button"
+                onClick={() => setZoomedEquationHtml(null)}
+                aria-label="Close zoomed equation"
+                className="p-1 rounded-lg text-slate-500 hover:text-slate-900 dark:hover:text-white"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <div
+              className="py-6 px-3 overflow-x-auto text-slate-900 dark:text-white [&_span.katex]:text-2xl sm:[&_span.katex]:text-3xl"
+              dangerouslySetInnerHTML={{ __html: zoomedEquationHtml }}
+            />
+          </div>
+        </div>
+      )}
     </section>
   );
 });
